@@ -1,71 +1,73 @@
-# 🌉 Autonomous Content Bridge
+# 🌉 Hermes Video Agent (Content Bridge)
 
 > **Hermes Agent Creative Hackathon** — Nous Research
 >
-> Tự động tải video từ YouTube/TikTok/Douyin → Dịch phụ đề sang tiếng Việt → Đăng lên X (Twitter)
+> An autonomous AI agent powered by Hermes that handles end-to-end video processing: extraction, translation, transcription, visual dubbing (OCR), and cross-platform publishing.
 
-## 🏗️ Architecture
+## 🏗️ Architecture & Features
 
+The system features two main operational modes driven by the **Hermes AI Orchestrator**:
+
+### 🎬 1. Full Pipeline (Auto-Publishing)
+```text
+URL Input → Download (yt-dlp / Playwright) → Extract Audio & Transcribe (Whisper)
+         → Translate Audio & Hardcoded Text (Kimi K2.6)
+         → Computer Vision OCR & Boxblur (EasyOCR + FFmpeg)
+         → Multimodal Scene Summary (Kimi Vision)
+         → Generate Dual-Language Subtitles (SRT/ASS)
+         → Burn Subtitles & Render (FFmpeg)
+         → AI Cover Generation (Flux via Fal.ai)
+         → Auto-Publish to X (Twitter API)
 ```
-URL Input → Download (yt-dlp) → Transcribe (Whisper) → Translate (Kimi K2.5)
-         → Generate Subtitles → Burn into Video (FFmpeg) → Publish to X
+
+### 📝 2. Script Extractor (Creative Mode)
+```text
+URL Input → Download → Transcribe → Kimi K2.6 Rewrite (Cinematic Scene Breakdown)
 ```
+- Automatically pulls Douyin/TikTok/YouTube videos.
+- Transcribes and uses Kimi K2.6 to break down the video into creative scenes with AI Image Prompts and localized Narration in the target language (Vietnamese, English, Korean, Japanese, Chinese).
 
-**Powered by:**
-- 🤖 **Hermes Agent** — Autonomous orchestration via function calling
-- 🧠 **Kimi K2.5** (Moonshot AI) — Translation & content analysis
-- 🎙️ **Whisper** (OpenAI) — Speech-to-text transcription
-- 🎬 **FFmpeg** — Video processing & subtitle rendering
-- 🐦 **Twitter API v2** — Auto-publishing
+## 🚀 Key Technologies
+- **🤖 Hermes Agent Orchestrator**: Uses function-calling to autonomously route tasks.
+- **🧠 Kimi K2.6 (Moonshot AI)**: Context-aware translation, script rewriting, and multimodal vision analysis.
+- **👁️ Computer Vision**: `EasyOCR` + OpenCV for tracking and blurring hardcoded Chinese text (e.g., cooking ingredients) and replacing it with translated text.
+- **🎙️ Whisper (OpenAI)**: Local speech-to-text.
+- **🎨 Flux (fal.ai)**: Generates highly engaging AI thumbnails.
+- **🎬 FFmpeg**: Heavy-duty video processing, box-blurring, and subtitle burning.
 
-## 🚀 Quick Start
+## 🚀 Quick Start (VPS Deployment)
 
 ```bash
 # 1. Clone to VPS
 ssh root@your-vps
+git clone https://github.com/ntclick/hermes-video-agent.git /opt/content-bridge
 cd /opt/content-bridge
 
-# 2. Run setup
+# 2. Run setup script (Installs Python venv, Node, PM2, FFmpeg, EasyOCR)
 bash scripts/setup.sh
 
 # 3. Add your API keys
+cp .env.example .env
 nano .env
 
-# 4. Start with PM2
+# 4. Start the ecosystem with PM2
 pm2 start ecosystem.config.js
 ```
 
-## 🔑 Required API Keys
+## 🔑 Required Environment Variables (.env)
 
-| Service | Where to get |
-|---------|-------------|
-| Kimi K2.5 | [platform.moonshot.cn](https://platform.moonshot.cn) |
-| Hermes Model | [openrouter.ai](https://openrouter.ai) |
-| X/Twitter | [developer.x.com](https://developer.x.com) |
-
-## 📡 API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/jobs` | Create new job |
-| GET | `/api/jobs` | List all jobs |
-| GET | `/api/jobs/{id}` | Get job details |
-| POST | `/api/jobs/{id}/retry` | Retry failed job |
-| DELETE | `/api/jobs/{id}` | Delete job |
-| GET | `/api/jobs/stats/summary` | Job statistics |
-| POST | `/api/agent/chat` | Chat with Hermes Agent |
-| WS | `/ws/jobs/{id}` | Real-time job updates |
-| GET | `/health` | Health check |
+| Variable | Description | Where to get |
+|----------|-------------|-------------|
+| `KIMI_API_KEY` | Kimi K2.6 model access | [platform.moonshot.cn](https://platform.moonshot.cn) |
+| `FAL_API_KEY` | Flux AI Image generation | [fal.ai](https://fal.ai) |
+| `HERMES_API_KEY`| Hermes 3 Agent Orchestration | [openrouter.ai](https://openrouter.ai) |
+| `TWITTER_API_KEY` | X Publishing | [developer.x.com](https://developer.x.com) |
 
 ## 📦 Tech Stack
 
-- **Backend**: Python 3.12 + FastAPI + SQLAlchemy (SQLite)
-- **Frontend**: Next.js 15 + TypeScript
-- **Agent**: Hermes 3 (Llama 3.1) via OpenRouter
-- **AI**: Kimi K2.5 (Moonshot) + Whisper (OpenAI)
-- **Video**: yt-dlp + FFmpeg
-- **Deploy**: PM2 + Caddy (reverse proxy)
+- **Backend**: Python 3.12 + FastAPI + SQLAlchemy + PyTorch (EasyOCR)
+- **Frontend**: Next.js 15 + React + TypeScript + Glassmorphic UI
+- **Deploy**: PM2 + Caddy (Reverse Proxy) + SSL
 
 ## 📄 License
-
 Built for the Hermes Agent Creative Hackathon by Nous Research.
