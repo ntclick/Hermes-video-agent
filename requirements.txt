@@ -1,0 +1,36 @@
+# Autonomous Content Bridge — Python Dependencies
+
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Database
+sqlalchemy==2.0.36
+aiosqlite==0.21.0
+
+# HTTP & APIs
+httpx==0.28.1
+openai==1.82.0
+twikit>=2.3.3
+playwright>=1.41.0
+fal-client>=0.5.0
+
+# Video & Audio
+yt-dlp==2026.3.17
+# openai-whisper==20240930
+
+# Subtitle Processing
+pysrt==1.1.2
+chardet==5.2.0
+
+# Configuration
+pydantic-settings==2.7.1
+python-dotenv==1.1.0
+
+# Utilities
+rich==13.9.4
+tenacity==9.0.0
+
+# WebSocket
+websockets==14.2
