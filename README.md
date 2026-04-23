@@ -63,6 +63,23 @@ pm2 start ecosystem.config.js
 | `HERMES_API_KEY`| Hermes 3 Agent Orchestration | [openrouter.ai](https://openrouter.ai) |
 | `TWITTER_API_KEY` | X Publishing | [developer.x.com](https://developer.x.com) |
 
+## 🧠 Hermes Agent Integration Guide
+
+The core of this project is driven by the **Hermes 3 Model** (via OpenRouter). The integration is built on **Function Calling (Tool Use)**:
+
+1. **System Prompt**: The agent is initialized with a system prompt instructing it to act as an autonomous video orchestrator.
+2. **Tool Definitions**: We provide JSON Schemas for various tools (e.g., `download_video`, `transcribe_video`, `rewrite_script`, `analyze_content`, `render_with_subtitles`).
+3. **Execution Loop**: When a user submits a job, the backend triggers the agent. Hermes evaluates the context and responds with a `tool_call`. The backend executes the actual Python function (e.g., FFmpeg processing) and returns the result back to Hermes, which then decides the next step.
+
+*Code Reference: See `backend/agent/hermes_agent.py` and `backend/agent/tools.py`.*
+
+## 🔒 Security & Authentication
+
+For the Hackathon presentation, the system is designed to run in a controlled VPS environment:
+- **API Security**: The FastAPI backend can be secured using standard API Key validation (OAuth2/Bearer Tokens).
+- **Frontend Protection**: The Next.js dashboard is meant for internal use. For public deployment, it is recommended to put the dashboard behind **Caddy Basic Auth** or integrate NextAuth.js.
+- **Environment Variables**: All sensitive API keys (X/Twitter, Kimi, Hermes, Fal.ai) are strictly loaded via server-side `.env` and are never exposed to the client-side frontend.
+
 ## 📦 Tech Stack
 
 - **Backend**: Python 3.12 + FastAPI + SQLAlchemy + PyTorch (EasyOCR)
