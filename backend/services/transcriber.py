@@ -59,6 +59,9 @@ async def extract_audio(video_path: str, job_id: int) -> str:
 
     if process.returncode != 0:
         error = stderr.decode("utf-8", errors="replace")
+        if "does not contain any stream" in error or "Invalid argument" in error:
+            logger.warning(f"[Job {job_id}] Video has no audio track. Returning None.")
+            return None
         logger.error(f"[Job {job_id}] FFmpeg audio extraction failed: {error}")
         raise RuntimeError(f"Audio extraction failed: {error[:500]}")
 
@@ -115,12 +118,15 @@ async def transcribe_audio(audio_path: str, job_id: int) -> list[dict]:
     return segments
 
 
-async def full_transcribe(video_path: str, job_id: int) -> tuple[str, list[dict]]:
+async def full_transcribe(video_path: str, job_id: int) -> tuple[str | None, list[dict]]:
     """
     Full pipeline: extract audio → transcribe.
 
     Returns: (audio_path, segments)
     """
     audio_path = await extract_audio(video_path, job_id)
+    if not audio_path:
+        return None, []
+        
     segments = await transcribe_audio(audio_path, job_id)
     return audio_path, segments

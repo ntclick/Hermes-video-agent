@@ -136,16 +136,18 @@ async def render_video(
             logger.warning(f"[Job {job_id}] Could not get video dimensions, skipping OCR filter validation")
 
     # Build subtitle filter
-    sub_ext = Path(subtitle_path).suffix.lower()
-    ff_subtitle_path = subtitle_path
-    if sys.platform == "win32":
-        ff_subtitle_path = ff_subtitle_path.replace('\\', '/').replace(':', '\\:')
+    sub_filter = ""
+    if subtitle_path:
+        sub_ext = Path(subtitle_path).suffix.lower()
+        ff_subtitle_path = subtitle_path
+        if sys.platform == "win32":
+            ff_subtitle_path = ff_subtitle_path.replace('\\', '/').replace(':', '\\:')
 
-    if sub_ext == ".ass":
-        mask_filter = "drawbox=y=ih-ih*0.18:color=black@0.75:width=iw:height=ih*0.18:t=fill"
-        sub_filter = f"{mask_filter},ass='{ff_subtitle_path}'"
-    else:
-        sub_filter = f"subtitles='{ff_subtitle_path}':force_style='FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Shadow=0,MarginV=40'"
+        if sub_ext == ".ass":
+            mask_filter = "drawbox=y=ih-ih*0.18:color=black@0.75:width=iw:height=ih*0.18:t=fill"
+            sub_filter = f"{mask_filter},ass='{ff_subtitle_path}'"
+        else:
+            sub_filter = f"subtitles='{ff_subtitle_path}':force_style='FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Shadow=0,MarginV=40'"
 
     # Try rendering with OCR filters first, fallback without if it fails
     result = await _do_render(
@@ -191,11 +193,15 @@ async def _do_render(
     Returns output_path on success, None on failure.
     """
     # Build full filter chain
-    if ocr_filters:
+    if ocr_filters and sub_filter:
         ocr_chain = ",".join(ocr_filters)
         full_filter = f"{ocr_chain},{sub_filter}"
-    else:
+    elif ocr_filters:
+        full_filter = ",".join(ocr_filters)
+    elif sub_filter:
         full_filter = sub_filter
+    else:
+        full_filter = ""
 
     # If filter chain is long, write to script file
     filter_script_path = None
@@ -216,7 +222,7 @@ async def _do_render(
 
     if use_script:
         cmd.extend(["-filter_script:v", filter_script_path])
-    else:
+    elif full_filter:
         cmd.extend(["-vf", full_filter])
 
     if _check_nvenc():
