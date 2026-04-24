@@ -312,6 +312,32 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     log_message=f"✅ Rendered: {size_mb:.1f}MB → {output_path}",
                     output_path=output_path)
 
+            # ── Step 5.5: Upload to Shelby (Decentralized Storage) ────
+            if await check_cancellation(session, job): return
+            try:
+                from backend.services.shelby import upload_to_shelby, _check_shelby_configured
+                if _check_shelby_configured():
+                    await _update_job(session, job, progress=90.5,
+                        log_message="🧩 [Hermes → tool] upload_to_shelby(video=output.mp4)")
+                    await _update_job(session, job, progress=91.0,
+                        log_message="☁️ [Shelby Protocol] Uploading rendered video to decentralized storage...")
+                    shelby_url = await upload_to_shelby(output_path, job.id, file_type="video")
+                    await _update_job(session, job, progress=91.5,
+                        log_message=f"✅ Shelby upload: {shelby_url}")
+                    # Optionally clean up local download to save VPS disk
+                    try:
+                        dl_dir = Path(dl_video_path).parent
+                        if dl_dir.exists():
+                            import shutil
+                            shutil.rmtree(dl_dir, ignore_errors=True)
+                            logger.info(f"[Job {job.id}] Cleaned up download dir: {dl_dir}")
+                    except Exception:
+                        pass
+            except Exception as shelby_err:
+                logger.warning(f"[Job {job.id}] Shelby upload skipped: {shelby_err}")
+                await _update_job(session, job, progress=91.5,
+                    log_message=f"⚠️ Shelby upload skipped: {str(shelby_err)[:150]}")
+
             # ── Step 6: Publish to X ──────────────────────────────────
             if await check_cancellation(session, job): return
             if auto_publish:
