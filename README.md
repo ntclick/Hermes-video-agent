@@ -35,7 +35,47 @@ URL Input → Download → Transcribe → Kimi K2.6 Rewrite (Cinematic Scene Bre
 - **🎨 Flux (fal.ai)**: Generates highly engaging AI thumbnails.
 - **🎬 FFmpeg**: Heavy-duty video processing, box-blurring, and subtitle burning.
 
-## 🚀 Quick Start (VPS Deployment)
+## 🚀 Setup & Installation (Local & VPS)
+
+### Option 1: Local Development (Windows)
+
+**1. Prerequisites:**
+- Python 3.12+
+- Node.js 20+
+- FFmpeg (Must be installed and added to your System PATH)
+- Git
+
+**2. Clone and Setup Backend:**
+```powershell
+git clone https://github.com/ntclick/hermes-video-agent.git
+cd hermes-video-agent/content-bridge
+
+# Setup Python Virtual Environment
+python -m venv venv
+.\venv\Scripts\activate
+
+# Install Dependencies
+pip install -r requirements.txt
+playwright install
+```
+
+**3. Setup Frontend:**
+```powershell
+cd frontend
+npm install
+```
+
+**4. Configuration:**
+Copy `.env.example` to `.env` in the `content-bridge` root directory and fill in your API keys (Kimi, OpenRouter/Hermes, etc.).
+
+**5. Start the Application:**
+You can run the provided startup script which will launch both the FastAPI backend and Next.js frontend:
+```powershell
+python start_windows.py
+```
+Access the dashboard at `http://localhost:3000`.
+
+### Option 2: Production Deployment (Linux VPS)
 
 ```bash
 # 1. Clone to VPS
@@ -53,6 +93,16 @@ nano .env
 # 4. Start the ecosystem with PM2
 pm2 start ecosystem.config.js
 ```
+
+## 🔄 Syncing with Hermes Agent Framework
+
+The Content Bridge is designed to operate seamlessly alongside the **Hermes Agent Framework**. 
+
+**To keep your repository in sync:**
+1. Ensure you have the latest upstream changes: `git pull origin main`
+2. If you are developing custom Hermes tools, place them in `backend/agent/tools.py`.
+3. The orchestration logic that binds the pipeline to the Hermes model is located in `backend/agent/hermes_agent.py`.
+4. Any changes to the `Job` model or database schema require regenerating the SQLite database (handled automatically on restart if using SQLAlchemy `create_all`, or via alembic if configured).
 
 ## 🔑 Required Environment Variables (.env)
 

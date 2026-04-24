@@ -1,215 +1,352 @@
+"""
+OCR Service — Autonomous Content Bridge
+Detects hardcoded text in video frames using EasyOCR,
+translates via Kimi, and generates FFmpeg filters to blur + overlay.
+"""
 import asyncio
 import logging
 import json
-import math
+import sys
+import re
 import tempfile
-import cv2
-import easyocr
 from pathlib import Path
-
-from backend.config import get_settings
-from backend.agent.tools import execute_tool
+from collections import defaultdict
 
 logger = logging.getLogger("content-bridge.ocr")
 
-# Lazy load the reader to avoid memory overhead when not used
+# ── Font mapping per target language ────────────────────────────────
+# Windows fonts
+_WIN_FONTS = {
+    "vi": "C\\:/Windows/Fonts/arial.ttf",          # Arial supports Vietnamese diacritics
+    "en": "C\\:/Windows/Fonts/arial.ttf",
+    "zh": "C\\:/Windows/Fonts/msyh.ttc",           # Microsoft YaHei — Chinese
+    "ja": "C\\:/Windows/Fonts/YuGothR.ttc",        # Yu Gothic — Japanese
+    "ko": "C\\:/Windows/Fonts/malgun.ttf",          # Malgun Gothic — Korean
+}
+# Linux fonts (install: apt install fonts-noto-cjk fonts-noto)
+_LINUX_FONTS = {
+    "vi": "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "en": "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "zh": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "ja": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "ko": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+}
+
+
+def _get_font_path(target_language: str) -> str:
+    """Get the appropriate font path for the target language."""
+    lang = target_language[:2].lower()
+    if sys.platform == "win32":
+        return _WIN_FONTS.get(lang, _WIN_FONTS["en"])
+    else:
+        return _LINUX_FONTS.get(lang, _LINUX_FONTS["en"])
+
+
+# ── Lazy-loaded EasyOCR reader ──────────────────────────────────────
 _reader = None
 
-def get_reader():
+def _get_reader():
     global _reader
     if _reader is None:
+        import easyocr
         logger.info("Loading EasyOCR models (ch_sim, en)...")
-        _reader = easyocr.Reader(['ch_sim', 'en'], gpu=True) # Will fallback to CPU if no GPU
+        _reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+        logger.info("EasyOCR loaded successfully.")
     return _reader
 
-async def extract_frames_for_ocr(video_path: str, output_dir: Path, fps: int = 1) -> list[Path]:
-    """Extract frames from the video at a specific fps."""
+
+# ── Frame extraction ────────────────────────────────────────────────
+async def _extract_frames(video_path: str, output_dir: Path, interval: int = 2) -> list[Path]:
+    """Extract frames from video at every `interval` seconds."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
-        "-vf", f"fps={fps}",
-        "-frame_pts", "1", # Name files by their timestamp in milliseconds/frames
+        "-vf", f"fps=1/{interval}",
         "-q:v", "2",
-        str(output_dir / "%05d.jpg")
+        str(output_dir / "frame_%04d.jpg")
     ]
-    
-    logger.info(f"Extracting frames for OCR at {fps} fps...")
+
     process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await process.communicate()
-    
+    _, stderr = await process.communicate()
+
     if process.returncode != 0:
-        logger.error(f"FFmpeg frame extraction failed: {stderr.decode()}")
-        raise RuntimeError("Failed to extract frames for OCR")
-        
-    frames = sorted(list(output_dir.glob("*.jpg")))
-    logger.info(f"Extracted {len(frames)} frames for OCR processing.")
+        raise RuntimeError(f"FFmpeg frame extraction failed: {stderr.decode()[-300:]}")
+
+    frames = sorted(output_dir.glob("frame_*.jpg"))
+    logger.info(f"Extracted {len(frames)} frames (every {interval}s)")
     return frames
 
-async def process_video_ocr(video_path: str, target_language: str, job_id: int, progress_callback=None) -> list[str]:
+
+# ── OCR + Grouping ──────────────────────────────────────────────────
+def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
     """
-    1. Extract frames
-    2. Detect Chinese text boxes
-    3. Translate unique texts
-    4. Generate FFmpeg filter strings (delogo + drawtext)
+    Run EasyOCR on sampled frames and group identical text across
+    consecutive frames into time ranges.
+
+    Returns list of:
+        {"text": str, "x": int, "y": int, "w": int, "h": int,
+         "t_start": float, "t_end": float}
     """
-    logger.info(f"[Job {job_id}] Starting OCR Translation Pipeline")
-    settings = get_settings()
-    
-    # We will use a temporary directory for frames
-    temp_dir = Path(tempfile.mkdtemp(prefix=f"ocr_job_{job_id}_"))
-    frames = await extract_frames_for_ocr(video_path, temp_dir, fps=1)
-    
-    if progress_callback:
-        await progress_callback(5.0, "Frames extracted. Starting OCR detection...")
-        
-    reader = get_reader()
-    
-    # Data structure to hold detections
-    # { frame_idx: [ {"text": "...", "bbox": (x, y, w, h), "conf": 0.9} ] }
-    all_detections = {}
-    unique_texts = set()
-    
-    # --- STEP 1: OCR Detection ---
-    # We run OCR on each frame. This is CPU intensive.
-    total_frames = len(frames)
+    reader = _get_reader()
+
+    # raw_detections: list of (frame_time, text, x, y, w, h)
+    raw = []
     for i, frame_path in enumerate(frames):
-        # frame_idx is in seconds because fps=1
-        frame_idx = int(frame_path.stem) - 1 # 1-indexed by ffmpeg usually, but %05d might start at 1
-        
-        # Read image
-        result = reader.readtext(str(frame_path), detail=1)
-        
-        frame_detections = []
-        for (bbox, text, prob) in result:
-            if prob < 0.3:
+        t = i * interval  # time in seconds
+        results = reader.readtext(str(frame_path), detail=1)
+
+        for bbox, text, confidence in results:
+            if confidence < 0.35 or not text.strip():
                 continue
-                
-            # bbox is a list of 4 points: [top-left, top-right, bottom-right, bottom-left]
+
             tl, tr, br, bl = bbox
             x = int(min(tl[0], bl[0]))
             y = int(min(tl[1], tr[1]))
             w = int(max(tr[0], br[0]) - x)
             h = int(max(bl[1], br[1]) - y)
-            
-            # Filter out very small boxes or full screen boxes
-            if w < 20 or h < 10 or w > 1500:
+
+            # Skip tiny or huge boxes
+            if w < 25 or h < 12 or w > 1600:
                 continue
-                
-            # Filter out pure numbers or English if we mainly want to translate Chinese
-            # But let's keep it simple and translate everything.
-            text = text.strip()
-            if not text:
-                continue
-                
-            frame_detections.append({
-                "text": text,
-                "x": x, "y": y, "w": w, "h": h
+
+            raw.append({
+                "text": text.strip(), "x": x, "y": y, "w": w, "h": h, "t": t
             })
-            unique_texts.add(text)
-            
-        all_detections[frame_idx] = frame_detections
-        
-        if progress_callback and i % 5 == 0:
-            await progress_callback(
-                5.0 + (i / total_frames) * 45.0, 
-                f"OCR Processing: {i}/{total_frames} frames"
-            )
-            
-    # --- STEP 2: Translation ---
-    if progress_callback:
-        await progress_callback(50.0, f"Translating {len(unique_texts)} unique text blocks to {target_language}...")
-        
-    unique_texts_list = list(unique_texts)
+
+    if not raw:
+        return []
+
+    # ── Group identical text at similar positions across frames ──
+    # Key: (text, quantized_x, quantized_y) → merge into time ranges
+    groups = defaultdict(list)
+    for det in raw:
+        # Quantize position to 30px grid to merge slightly shifted text
+        qx = det["x"] // 30
+        qy = det["y"] // 30
+        key = (det["text"], qx, qy)
+        groups[key].append(det)
+
+    merged = []
+    for key, dets in groups.items():
+        times = [d["t"] for d in dets]
+        # Average position across all frames
+        avg_x = int(sum(d["x"] for d in dets) / len(dets))
+        avg_y = int(sum(d["y"] for d in dets) / len(dets))
+        max_w = max(d["w"] for d in dets)
+        max_h = max(d["h"] for d in dets)
+
+        merged.append({
+            "text": dets[0]["text"],
+            "x": avg_x, "y": avg_y, "w": max_w, "h": max_h,
+            "t_start": max(0, min(times) - 0.5),
+            "t_end": max(times) + interval + 0.5,
+        })
+
+    # Sort by time, limit to 40 regions max to prevent FFmpeg overload
+    merged.sort(key=lambda r: (r["t_start"], r["y"]))
+    if len(merged) > 40:
+        logger.warning(f"Too many OCR regions ({len(merged)}), keeping top 40")
+        merged = merged[:40]
+
+    logger.info(f"Grouped {len(raw)} raw detections into {len(merged)} text regions")
+    return merged
+
+
+# ── Translation ─────────────────────────────────────────────────────
+async def _translate_texts(texts: list[str], target_language: str, job_id: int) -> dict[str, str]:
+    """Batch translate unique text strings via Kimi."""
+    from backend.config import get_settings
+    settings = get_settings()
+
+    unique = list(set(texts))
+    if not unique:
+        return {}
+
     translation_map = {}
-    
-    if unique_texts_list:
-        # We can batch translate using Kimi
-        # Chunking if too many
-        chunk_size = 50
-        for i in range(0, len(unique_texts_list), chunk_size):
-            chunk = unique_texts_list[i:i+chunk_size]
-            prompt = f"Translate the following short video text snippets (like cooking ingredients or subtitles) from Chinese to {target_language}. Return a JSON object mapping the original text to the translated text. ONLY return the valid JSON object.\n\n"
-            prompt += json.dumps(chunk, ensure_ascii=False)
-            
+    chunk_size = 40
+
+    for i in range(0, len(unique), chunk_size):
+        chunk = unique[i:i + chunk_size]
+        # Map language code to full name
+        _lang_names = {"vi": "Vietnamese", "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean"}
+        lang_name = _lang_names.get(target_language[:2], target_language)
+        prompt = (
+            f"Translate the following short text snippets from Chinese to {lang_name}. "
+            f"These are hardcoded text overlays in a cooking/lifestyle video. "
+            f"Return ONLY a valid JSON object mapping original text to translated text.\n\n"
+            + json.dumps(chunk, ensure_ascii=False)
+        )
+
+        try:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=settings.kimi_api_key, base_url=settings.kimi_base_url)
-            
-            try:
-                response = await client.chat.completions.create(
-                    model="kimi-k2.6",
-                    messages=[
-                        {"role": "system", "content": "You are a professional translator. Always return a valid JSON object map: {\"original\": \"translated\"}."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    extra_body={"thinking": {"type": "disabled"}},
-                    response_format={"type": "json_object"}
-                )
-                
-                content = response.choices[0].message.content
-                translated_chunk = json.loads(content)
-                translation_map.update(translated_chunk)
-            except Exception as e:
-                logger.error(f"Translation chunk failed: {e}")
-                # Fallback: keep original
-                for t in chunk:
-                    translation_map[t] = t
-                    
-    # --- STEP 3: Generate FFmpeg Filters ---
-    if progress_callback:
-        await progress_callback(70.0, "Generating FFmpeg overlay filters...")
-        
-    filters = []
-    
-    # We will generate delogo and drawtext filters for each frame
-    # Since fps=1, each frame represents exactly 1 second of video
-    # between(t, start, end)
-    
-    for frame_idx, detections in all_detections.items():
-        start_t = frame_idx
-        end_t = frame_idx + 1
-        
-        for det in detections:
-            x, y, w, h = det["x"], det["y"], det["w"], det["h"]
-            original_text = det["text"]
-            translated_text = translation_map.get(original_text, original_text)
-            
-            # Clean text for FFmpeg (escape colons, commas, quotes)
-            safe_text = translated_text.replace("'", "").replace(":", "\\:").replace(",", "\\,")
-            
-            # 1. Delogo (Blur)
-            # delogo requires width and height to be at least 1, and inside bounds
-            # To avoid errors, pad w and h slightly but keep in bounds
-            w_pad = max(1, w + 10)
-            h_pad = max(1, h + 10)
-            x_pad = max(0, x - 5)
-            y_pad = max(0, y - 5)
-            
-            filters.append(f"delogo=x={x_pad}:y={y_pad}:w={w_pad}:h={h_pad}:enable='between(t,{start_t},{end_t})'")
-            
-            # 2. Drawtext
-            # Use Arial or a generic sans-serif font
-            font_size = max(12, int(h * 0.8)) # Scale font size relative to bounding box
-            # We add a semi-transparent black background box just in case delogo isn't clean enough
-            drawtext_filter = (
-                f"drawtext=text='{safe_text}':"
-                f"fontcolor=white:fontsize={font_size}:"
-                f"box=1:boxcolor=black@0.6:boxborderw=5:"
-                f"x={x}:y={y}:"
-                f"enable='between(t,{start_t},{end_t})'"
+
+            response = await client.chat.completions.create(
+                model="kimi-k2.6",
+                messages=[
+                    {"role": "system", "content": "You are a professional translator. Return only valid JSON: {\"original\": \"translated\"}."},
+                    {"role": "user", "content": prompt}
+                ],
+                extra_body={"thinking": {"type": "disabled"}},
+                response_format={"type": "json_object"},
             )
-            filters.append(drawtext_filter)
-            
-    # Cleanup temp dir
-    try:
-        import shutil
-        shutil.rmtree(temp_dir)
-    except Exception:
-        pass
+
+            content = response.choices[0].message.content
+            translated = json.loads(content)
+            translation_map.update(translated)
+            logger.info(f"[Job {job_id}] Translated OCR chunk: {len(translated)} items")
+        except Exception as e:
+            logger.error(f"[Job {job_id}] OCR translation chunk failed: {e}")
+            for t in chunk:
+                translation_map[t] = t  # fallback: keep original
+
+    return translation_map
+
+
+# ── FFmpeg filter generation ────────────────────────────────────────
+def _escape_ffmpeg_text(text: str) -> str:
+    """Escape special characters for FFmpeg drawtext filter."""
+    # FFmpeg drawtext escaping rules
+    text = text.replace("\\", "\\\\\\\\")
+    text = text.replace("'", "\u2019")  # replace apostrophe with unicode right single quote
+    text = text.replace(":", "\\:")
+    text = text.replace(",", "\\,")
+    text = text.replace(";", "\\;")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    text = text.replace("%", "%%")
+    return text
+
+
+def _build_filters(regions: list[dict], translation_map: dict, target_language: str) -> list[str]:
+    """
+    Generate FFmpeg filter strings for each text region:
+    1. delogo (blur original text area)
+    2. drawtext (overlay translated text)
+    """
+    font_path = _get_font_path(target_language)
+    filters = []
+
+    import textwrap
+
+    for region in regions:
+        original = region["text"]
+        translated = translation_map.get(original, original)
+        if translated == original and target_language[:2] != "zh":
+            # Skip if translation failed and we're not keeping Chinese
+            continue
+
+        x, y, w, h = region["x"], region["y"], region["w"], region["h"]
+        t_start, t_end = region["t_start"], region["t_end"]
+        enable = f"between(t,{t_start:.1f},{t_end:.1f})"
+
+        # 1. Blur original text (delogo with padding)
+        x_pad = max(0, x - 4)
+        y_pad = max(0, y - 4)
+        w_pad = w + 8
+        h_pad = h + 8
+        filters.append(
+            f"delogo=x={x_pad}:y={y_pad}:w={w_pad}:h={h_pad}:enable='{enable}'"
+        )
+
+        # 2. Draw translated text on top
+        # Estimate max characters per line based on font size and box width
+        font_size = max(14, min(int(h * 0.75), 36))
+        # average char width is about 0.6 * font_size
+        chars_per_line = max(15, int(w / (font_size * 0.6)))
         
-    logger.info(f"[Job {job_id}] OCR Pipeline finished. Generated {len(filters)} filters.")
+        # Wrap the text
+        wrapped_lines = textwrap.wrap(translated, width=chars_per_line)
+        
+        # Draw each line separately, moving down by font_size * 1.2
+        for i, line in enumerate(wrapped_lines):
+            safe_text = _escape_ffmpeg_text(line)
+            line_y = y + int(i * font_size * 1.2)
+            filters.append(
+                f"drawtext=text='{safe_text}':"
+                f"fontfile='{font_path}':"
+                f"fontcolor=white:fontsize={font_size}:"
+                f"box=1:boxcolor=black@0.5:boxborderw=3:"
+                f"x={x}:y={line_y}:"
+                f"enable='{enable}'"
+            )
+
     return filters
+
+
+# ── Main entry point ────────────────────────────────────────────────
+async def process_video_ocr(
+    video_path: str,
+    target_language: str,
+    job_id: int,
+    progress_callback=None,
+) -> list[str]:
+    """
+    Full OCR pipeline:
+    1. Extract frames (every 2s)
+    2. Detect text regions with EasyOCR
+    3. Group identical text across frames
+    4. Translate unique texts via Kimi
+    5. Generate FFmpeg delogo + drawtext filters
+
+    Returns: list of FFmpeg filter strings
+    """
+    logger.info(f"[Job {job_id}] Starting OCR Translation Pipeline")
+
+    # Step 1: Extract frames
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"ocr_job_{job_id}_"))
+    try:
+        frames = await _extract_frames(video_path, temp_dir, interval=2)
+
+        if progress_callback:
+            await progress_callback(10.0, f"Extracted {len(frames)} frames for OCR")
+
+        if not frames:
+            logger.warning(f"[Job {job_id}] No frames extracted, skipping OCR")
+            return []
+
+        # Step 2: OCR detection (CPU-heavy, run in thread)
+        if progress_callback:
+            await progress_callback(15.0, "Running EasyOCR detection (this is slow)...")
+
+        regions = await asyncio.get_event_loop().run_in_executor(
+            None, _detect_text_regions, frames, 2
+        )
+
+        if progress_callback:
+            await progress_callback(50.0, f"Detected {len(regions)} text regions")
+
+        if not regions:
+            logger.info(f"[Job {job_id}] No text detected in video frames")
+            return []
+
+        # Step 3: Translate
+        if progress_callback:
+            await progress_callback(55.0, f"Translating {len(set(r['text'] for r in regions))} unique texts...")
+
+        unique_texts = [r["text"] for r in regions]
+        translation_map = await _translate_texts(unique_texts, target_language, job_id)
+
+        if progress_callback:
+            await progress_callback(75.0, "Generating FFmpeg overlay filters...")
+
+        # Step 4: Build filters
+        filters = _build_filters(regions, translation_map, target_language)
+
+        logger.info(f"[Job {job_id}] OCR pipeline complete: {len(filters)} FFmpeg filters generated")
+
+        if progress_callback:
+            await progress_callback(100.0, f"OCR done: {len(filters)} filters ready")
+
+        return filters
+
+    finally:
+        # Cleanup temp frames
+        try:
+            import shutil
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass

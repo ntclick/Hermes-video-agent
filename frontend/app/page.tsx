@@ -6,7 +6,7 @@ import {
   Job, JobStats, XAccount, AppSettings,
   API_BASE, createJob, getJobs, getStats, getXAccounts, getSettings,
   retryJob, connectWebSocket, deleteJob, generateCover,
-  updateJob, regenerateCover, rewriteScript, writeScript,
+  updateJob, regenerateCover, rewriteScript, writeScript, cancelJob, publishJob,
 } from '@/lib/api';
 
 // ── Agent activity per pipeline stage ──────────────────────
@@ -110,6 +110,7 @@ export default function Dashboard() {
   const [tweetDraft, setTweetDraft]         = useState('');
   const [savingTweet, setSavingTweet]       = useState(false);
   const [coverBusy, setCoverBusy]           = useState<null | 'regen' | 'rewrite' | 'generate'>(null);
+  const [lightboxUrl, setLightboxUrl]       = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -156,9 +157,29 @@ export default function Dashboard() {
     try { const j = await retryJob(id); setSelected(j); await fetchAll(); } catch (e: any) { setFormError(e.message); }
   };
 
+  const handleCancel = async (id: number) => {
+    if (!confirm("Are you sure you want to cancel this job?")) return;
+    try { 
+      await cancelJob(id); 
+      await fetchAll();
+      // Update selected state locally if it's the one we're viewing
+      if (selected && selected.id === id) {
+        setSelected({ ...selected, status: 'cancelled' });
+      }
+    } catch (e: any) { setFormError(e.message); }
+  };
+
   const handleDelete = async (id: number) => {
     if (!confirm('Delete this job?')) return;
     try { await deleteJob(id); if (selected?.id === id) setSelected(null); await fetchAll(); } catch {}
+  };
+
+  const handlePublishJob = async (id: number) => {
+    try { 
+      await publishJob(id); 
+      setTab('logs');
+      await fetchAll();
+    } catch (e: any) { setFormError(e.message); }
   };
 
   // Tweet editing
@@ -448,33 +469,48 @@ export default function Dashboard() {
                           <div><strong>Selected Language:</strong> {selected.target_language.toUpperCase()}</div>
                           <div><strong>Original Duration:</strong> {Math.round(selected.duration || 0)}s</div>
                           <div><strong>Output Video:</strong> <a href={`${API_BASE}/api/videos/${selected.id}/output.mp4`} download style={{ color: 'var(--accent)' }}>Download Subtitled Video</a></div>
-                          {selected.tweet_id && (
+                          {selected.tweet_id ? (
                             <div><strong>X (Twitter) Post:</strong> <a href={`https://x.com/i/status/${selected.tweet_id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>https://x.com/i/status/{selected.tweet_id}</a></div>
+                          ) : (
+                            <button 
+                              className="btn btn-primary" 
+                              style={{ padding: '6px 12px', alignSelf: 'flex-start', marginTop: 4 }}
+                              onClick={() => handlePublishJob(selected.id)}
+                            >
+                              🚀 Publish to X
+                            </button>
                           )}
                         </div>
                       </div>
                     )}
 
-                    {/* AI Summary */}
+                    {/* AI Summary — show whenever available */}
                     {selected.summary && (
                       <div className="summary-box">
                         <div className="box-label">🧠 AI Summary</div>
                         <div className="summary-text">{selected.summary}</div>
-                        {selected.frames_path && (
-                          <div style={{ marginTop: 12 }}>
-                            <div className="box-label" style={{ marginBottom: 6 }}>Keyframes</div>
-                            <div className="frames-strip">
-                              {[1,2,3,4,5].map(n => (
-                                <img
-                                  key={n}
-                                  src={`${API_BASE}/api/videos/${selected.id}/frames/frame_00${n}.jpg`}
-                                  alt={`frame ${n}`}
-                                  onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                />
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                      </div>
+                    )}
+
+                    {/* Keyframes — show whenever frames exist (even during pipeline or on failure) */}
+                    {selected.frames_path && (
+                      <div className="summary-box">
+                        <div className="box-label" style={{ marginBottom: 6 }}>🎞️ Keyframes</div>
+                        <div className="frames-strip">
+                          {[1,2,3,4,5].map(n => {
+                            const imgUrl = `${API_BASE}/api/videos/${selected.id}/frames/frame_00${n}.jpg`;
+                            return (
+                              <img
+                                key={n}
+                                src={imgUrl}
+                                alt={`frame ${n}`}
+                                onClick={() => setLightboxUrl(imgUrl)}
+                                onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                style={{ cursor: 'pointer' }}
+                              />
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
 
@@ -517,6 +553,9 @@ export default function Dashboard() {
                           <button className="btn-ghost" onClick={() => handleRetry(selected.id)}>🔄 Retry</button>
                           <button className="btn-danger" onClick={() => handleDelete(selected.id)}>🗑 Delete</button>
                         </>
+                      )}
+                      {['pending', 'downloading', 'transcribing', 'translating', 'rendering', 'publishing'].includes(selected.status) && (
+                        <button className="btn-danger" onClick={() => handleCancel(selected.id)}>⏹ Cancel</button>
                       )}
                       {selected.tweet_id && (
                         <a
@@ -685,6 +724,19 @@ export default function Dashboard() {
           )}
         </main>
       </div>
+
+      {/* ── Keyframe Lightbox ────────────────────── */}
+      {lightboxUrl && (
+        <div
+          className="lightbox-overlay"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <div className="lightbox-content" onClick={e => e.stopPropagation()}>
+            <button className="lightbox-close" onClick={() => setLightboxUrl(null)}>✕</button>
+            <img src={lightboxUrl} alt="Keyframe preview" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

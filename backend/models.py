@@ -19,6 +19,7 @@ class JobStatus(str, enum.Enum):
     PUBLISHING = "publishing"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class Platform(str, enum.Enum):

@@ -64,6 +64,7 @@ export default function Extractor() {
   const [formError, setFormError] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   const fetchAll = async () => {
     try {
@@ -241,16 +242,70 @@ export default function Extractor() {
                        </div>
                     )}
 
-                    {selected.status === 'completed' && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                        {selected.script_json && (
+                    {(() => {
+                      let parsedScript = null;
+                      if (selected.script_json) {
+                        try {
+                          parsedScript = JSON.parse(selected.script_json);
+                        } catch (e) {
+                          console.error("Failed to parse script_json", e);
+                        }
+                      }
+
+                      return selected.status === 'completed' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                        
+                        {/* Downloaded Video Player */}
+                        <div className="agent-card" style={{ background: 'var(--surface-1)', padding: 0, overflow: 'hidden' }}>
+                          <div className="agent-card-title" style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>🎬 Original Video</div>
+                          <video 
+                            controls 
+                            src={`${API_BASE}/api/jobs/${selected.id}/raw-video`}
+                            style={{ width: '100%', display: 'block', maxHeight: 400, background: '#000' }}
+                          />
+                        </div>
+
+                        {/* AI Summary */}
+                        {selected.summary && (
+                          <div className="agent-card" style={{ background: 'var(--surface-1)' }}>
+                            <div className="agent-card-title">🧠 AI Summary</div>
+                            <div style={{ fontSize: 13, color: 'var(--text-1)', marginTop: 8, lineHeight: 1.6 }}>
+                              {selected.summary}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Keyframes */}
+                        {selected.frames_path && (
+                          <div className="agent-card" style={{ background: 'var(--surface-1)' }}>
+                            <div className="agent-card-title" style={{ marginBottom: 12 }}>🎞️ Keyframes</div>
+                            <div className="frames-strip">
+                              {[1,2,3,4,5].map(n => {
+                                const imgUrl = `${API_BASE}/api/videos/${selected.id}/frames/frame_00${n}.jpg`;
+                                return (
+                                  <img
+                                    key={n}
+                                    src={imgUrl}
+                                    alt={`frame ${n}`}
+                                    onClick={() => setLightboxUrl(imgUrl)}
+                                    onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                    style={{ cursor: 'pointer' }}
+                                  />
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Rewritten Script */}
+                        {parsedScript && (
                           <div className="agent-card" style={{ background: 'var(--surface-1)' }}>
                             <div className="agent-card-title" style={{ color: 'var(--accent)', display: 'flex', justifyContent: 'space-between' }}>
                               <span>✨ Rewritten AI Script</span>
                               <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{selected.target_language.replace('script_', '').toUpperCase()}</span>
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
-                              {JSON.parse(selected.script_json).map((scene: any, i: number) => (
+                              {parsedScript.map((scene: any, i: number) => (
                                 <div key={i} style={{ padding: 16, background: 'var(--bg-base)', borderRadius: 8, border: '1px solid var(--border)', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
                                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                                     <div style={{ fontSize: 12, color: 'var(--text-3)', fontWeight: 600, letterSpacing: 1 }}>SCENE {scene.scene_number || i + 1}</div>
@@ -277,7 +332,7 @@ export default function Extractor() {
                           </div>
                         )}
                       </div>
-                    )}
+                    })()}
                   </>
                 )}
               </div>
@@ -285,6 +340,16 @@ export default function Extractor() {
           )}
         </main>
       </div>
+
+      {/* Lightbox Modal */}
+      {lightboxUrl && (
+        <div className="lightbox-overlay" onClick={() => setLightboxUrl(null)}>
+          <div className="lightbox-content" onClick={e => e.stopPropagation()}>
+            <img src={lightboxUrl} alt="Keyframe Preview" />
+            <button className="lightbox-close" onClick={() => setLightboxUrl(null)}>×</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -74,7 +74,7 @@ async def extract_keyframes(video_path: str, job_id: int, max_frames: int = 5) -
     return str(frames_dir)
 
 
-async def summarize_multimodal(frames_dir: str, transcript: str, job_id: int) -> str:
+async def summarize_multimodal(frames_dir: str, transcript: str, job_id: int, target_language: str = "vi") -> str:
     """
     Generate a video summary using Kimi 2.5 with vision (if supported) + transcript.
     """
@@ -99,10 +99,14 @@ async def summarize_multimodal(frames_dir: str, transcript: str, job_id: int) ->
 
     logger.info(f"[Job {job_id}] Generating multimodal summary with {len(images)} images and transcript...")
 
+    # Map language codes to full names for the prompt
+    _lang_names = {"vi": "Vietnamese", "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean"}
+    lang_name = _lang_names.get(target_language[:2], target_language)
+
     system_prompt = (
         "You are an AI assistant that explains what happens in a video. "
         "You will be given a few keyframes (images) from the video and the full spoken transcript (subtitles). "
-        "Generate a cohesive, structured summary in Vietnamese summarizing what the video is about, "
+        f"Generate a cohesive, structured summary in {lang_name} summarizing what the video is about, "
         "the visual context (what is seen), and the main message. Keep it concise (1-2 paragraphs). "
         "Do not list the frames. Synthesize the multimodal information into a smooth summary."
     )

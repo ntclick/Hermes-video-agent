@@ -653,6 +653,76 @@ html, body {
   object-fit: cover;
   flex-shrink: 0;
   background: #000;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.frames-strip img:hover {
+  transform: scale(1.08);
+  box-shadow: 0 0 12px rgba(var(--accent-rgb, 99, 102, 241), 0.5);
+}
+
+/* ── Lightbox Popup ─────────────────────────────────────── */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: lightbox-fade-in 0.2s ease;
+  cursor: pointer;
+}
+
+@keyframes lightbox-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.lightbox-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  cursor: default;
+  animation: lightbox-scale-in 0.2s ease;
+}
+
+@keyframes lightbox-scale-in {
+  from { transform: scale(0.9); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+.lightbox-content img {
+  max-width: 90vw;
+  max-height: 85vh;
+  border-radius: var(--r-md);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  object-fit: contain;
+}
+
+.lightbox-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface-2);
+  color: var(--text-1);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.lightbox-close:hover {
+  background: var(--accent);
+  color: #fff;
 }
 
 /* ── Log Viewer ──────────────────────────────────────────── */

@@ -248,7 +248,9 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path) -> di
         video_url = "https:" + video_url
 
     # Download the intercepted video URL
-    output_path = output_dir / f"{title[:80]}.mp4"
+    import re
+    safe_title = re.sub(r'[\\/*?:"<>|]', "_", title[:80])
+    output_path = output_dir / f"{safe_title}.mp4"
     logger.info(f"[Job {job_id}] 📥 Downloading raw video stream to {output_path}...")
 
     headers = {
@@ -271,7 +273,7 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path) -> di
 
     # Generate an info.json for consistency
     info_dict = {"title": title, "duration": None, "thumbnail": None}
-    with open(output_dir / f"{title[:80]}.info.json", "w", encoding="utf-8") as f:
+    with open(output_dir / f"{safe_title}.info.json", "w", encoding="utf-8") as f:
         json.dump(info_dict, f, ensure_ascii=False)
 
     return {

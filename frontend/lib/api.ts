@@ -88,9 +88,27 @@ export async function retryJob(id: number): Promise<Job> {
   return res.json();
 }
 
+export async function cancelJob(id: number): Promise<{ message: string }> {
+  const res = await fetch(`${API_BASE}/api/jobs/${id}/cancel`, { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to cancel job: ${res.statusText}`);
+  }
+  return res.json();
+}
+
 export async function deleteJob(id: number): Promise<void> {
   const res = await fetch(`${API_BASE}/api/jobs/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`Failed to delete job: ${res.statusText}`);
+}
+
+export async function publishJob(id: number): Promise<{ message: string }> {
+  const res = await fetch(`${API_BASE}/api/jobs/${id}/publish`, { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `Failed to publish: ${res.statusText}`);
+  }
+  return res.json();
 }
 
 export async function getStats(): Promise<JobStats> {

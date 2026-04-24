@@ -6,6 +6,7 @@ import sys
 import asyncio
 
 # Fix for "NotImplementedError" in asyncio.subprocess on Windows (Python 3.8+)
+# Note: This is only needed for local Windows dev; VPS (Linux) handles this natively.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
@@ -110,6 +111,7 @@ app.include_router(settings_router)
 
 # Mount static files for video playback
 app.mount("/api/videos", StaticFiles(directory=settings.processed_dir), name="videos")
+app.mount("/api/downloads", StaticFiles(directory=settings.downloads_dir), name="downloads")
 
 
 # ── Health Check ──────────────────────────────────────────────
@@ -187,8 +189,9 @@ async def agent_chat(body: AgentChatRequest):
 # Create __init__.py files for proper Python packaging
 import pathlib
 
+_project_root = pathlib.Path(__file__).resolve().parent.parent
 for init_dir in ["backend", "backend/services", "backend/agent", "backend/api", "backend/workers"]:
-    init_file = pathlib.Path(f"/opt/content-bridge/{init_dir}/__init__.py")
+    init_file = _project_root / init_dir / "__init__.py"
     init_file.parent.mkdir(parents=True, exist_ok=True)
     if not init_file.exists():
         init_file.write_text("")

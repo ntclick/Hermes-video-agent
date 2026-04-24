@@ -17,12 +17,23 @@ from backend.services.translator import translate_segments, generate_tweet_text
 from backend.services.subtitle import generate_dual_subtitles
 from backend.services.renderer import render_video
 from backend.services.publisher import publish_to_x
-from backend.services.vision import extract_keyframes, summarize_multimodal
+from backend.services.vision import summarize_multimodal, extract_keyframes, summarize_multimodal
 
 logger = logging.getLogger("content-bridge.pipeline")
 
 # Global dict to track active WebSocket connections per job
 _ws_connections: dict[int, list] = {}
+
+# Tracking for cancelled jobs to stop the pipeline
+_cancelled_jobs: set[int] = set()
+
+def cancel_job_pipeline(job_id: int):
+    """Signal that a job should be cancelled."""
+    _cancelled_jobs.add(job_id)
+
+def is_job_cancelled(job_id: int) -> bool:
+    """Check if a job has been cancelled."""
+    return job_id in _cancelled_jobs
 
 
 def register_ws(job_id: int, ws):
@@ -97,6 +108,17 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
     6. Publish to X (Twitter)
     """
     factory = get_session_factory()
+    
+    # Ensure job is removed from cancelled set if it was there from a previous run
+    if job_id in _cancelled_jobs:
+        _cancelled_jobs.remove(job_id)
+
+    async def check_cancellation(session, job):
+        """Helper to check if job was cancelled and stop the pipeline."""
+        if is_job_cancelled(job_id):
+            await _update_job(session, job, status=JobStatus.CANCELLED, progress=job.progress, log_message="🛑 Job cancelled by user.")
+            return True
+        return False
 
     async with factory() as session:
         job = await session.get(Job, job_id)
@@ -106,6 +128,9 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
 
         try:
             settings = get_settings()
+
+            # Check for initial cancellation
+            if await check_cancellation(session, job): return
 
             # ── Agent Banner ──────────────────────────────────────────
             provider = (settings.hermes_provider or "openrouter").lower()
@@ -130,6 +155,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
             )
 
             # ── Step 1: Download ──────────────────────────────────────
+            if await check_cancellation(session, job): return
             if job.video_path:
                 import os
                 size_mb = os.path.getsize(job.video_path) / (1024*1024) if os.path.exists(job.video_path) else 0
@@ -142,7 +168,12 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     log_message=f"🧩 [Hermes → tool] download_video(url=\"{job.url[:60]}...\")")
                 await _update_job(session, job, progress=6.0,
                     log_message=f"🔽 [yt-dlp] Downloading from {job.url}...")
-                dl_result = await download_video(job.url, job.id)
+                
+                try:
+                    dl_result = await download_video(job.url, job.id)
+                except Exception as ex:
+                    raise ex
+
                 dl_video_path = dl_result["video_path"]
                 dl_title = dl_result["title"]
                 import os
@@ -155,7 +186,9 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     platform=dl_result["platform"],
                 )
 
+
             # ── Step 2: Transcribe ────────────────────────────────────
+            if await check_cancellation(session, job): return
             if job.transcript and job.audio_path:
                 seg_count = len(job.transcript.strip().split("\n"))
                 await _update_job(session, job, status=JobStatus.TRANSCRIBING, progress=45.0,
@@ -176,6 +209,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     audio_path=audio_path, transcript=transcript_text)
 
             # ── Step 3: Translate ─────────────────────────────────────
+            if await check_cancellation(session, job): return
             if job.translation and job.subtitle_path:
                 seg_count = len(job.translation.strip().split("\n"))
                 await _update_job(session, job, status=JobStatus.TRANSLATING, progress=65.0,
@@ -195,6 +229,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     translation=translation_text)
 
             # ── Step 3.5: Vision & Summary ────────────────────────────
+            if await check_cancellation(session, job): return
             if job.frames_path and job.summary:
                 await _update_job(session, job, progress=68.0,
                     log_message=f"⏩ Skipping vision (cached summary: {len(job.summary)} chars)")
@@ -212,7 +247,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     
                     await _update_job(session, job, progress=68.0,
                         log_message=f"🧠 [Kimi K2.5 Vision] Sending {frame_count} images + transcript for multimodal summary...")
-                    summary = await summarize_multimodal(frames_dir, transcript_text, job.id)
+                    summary = await summarize_multimodal(frames_dir, transcript_text, job.id, target_language=job.target_language)
                     await _update_job(session, job, progress=69.0,
                         log_message=f"✅ AI Summary ({len(summary)} chars): \"{summary[:100]}...\"", summary=summary)
                 except Exception as ve:
@@ -221,6 +256,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                         log_message=f"⚠️ Vision step skipped: {str(ve)[:200]}")
 
             # ── Step 4: Generate Subtitles ────────────────────────────
+            if await check_cancellation(session, job): return
             if job.subtitle_path:
                 srt_path = job.subtitle_path
                 ass_path = srt_path.replace(".srt", ".ass")
@@ -257,6 +293,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                         log_message=f"⚠️ OCR text translation skipped: {str(e)[:200]}")
 
             # ── Step 5: Render Video ──────────────────────────────────
+            if await check_cancellation(session, job): return
             if job.output_path:
                 import os
                 size_mb = os.path.getsize(job.output_path) / (1024*1024) if os.path.exists(job.output_path) else 0
@@ -276,6 +313,7 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     output_path=output_path)
 
             # ── Step 6: Publish to X ──────────────────────────────────
+            if await check_cancellation(session, job): return
             if auto_publish:
                 await _update_job(
                     session, job,
@@ -338,13 +376,19 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                 )
 
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             logger.exception(f"[Job {job_id}] Pipeline failed")
             await _update_job(
                 session, job,
                 status=JobStatus.FAILED,
-                log_message=f"❌ [Hermes Agent] Tool failed at stage \"{job.status}\" → {str(e)[:500]}",
-                error_message=str(e),
+                log_message=f"❌ [Hermes Agent] Tool failed at stage \"{job.status}\" → {repr(e)}\n\n{tb[:500]}",
+                error_message=tb,
             )
+        finally:
+            # Cleanup from cancelled set
+            if job_id in _cancelled_jobs:
+                _cancelled_jobs.remove(job_id)
 
 async def run_script_task(job_id: int):
     """
@@ -395,18 +439,40 @@ async def run_script_task(job_id: int):
                 log_message=f"✅ Transcribed: {len(transcript_segments)} segments | Preview: \"{preview}...\"",
                 audio_path=audio_path, transcript=transcript_text)
                 
+            # ── Step 2.5: Vision & Summary ────────────────────────────
+            await _update_job(session, job, progress=52.0,
+                log_message=f"🧩 [Hermes → tool] analyze_content(extract_frames=5, summarize=True)")
+            await _update_job(session, job, progress=53.0,
+                log_message=f"📸 [FFmpeg] Extracting keyframes from video for scene analysis...")
+            try:
+                frames_dir = await extract_keyframes(dl_video_path, job.id, max_frames=5)
+                import os
+                frame_count = len([f for f in os.listdir(frames_dir) if f.endswith('.jpg')]) if os.path.exists(frames_dir) else 0
+                await _update_job(session, job, progress=54.0,
+                    log_message=f"✅ Extracted {frame_count} keyframes → {frames_dir}", frames_path=frames_dir)
+                
+                # Map script_xx prefix to actual language names
+                lang_code = job.target_language.replace("script_", "") if job.target_language.startswith("script_") else "vi"
+                language_map = {"vi": "Vietnamese", "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean"}
+                target_lang = language_map.get(lang_code, "Vietnamese")
+
+                await _update_job(session, job, progress=55.0,
+                    log_message=f"🧠 [Kimi K2.5 Vision] Sending {frame_count} images + transcript for multimodal summary...")
+                summary = await summarize_multimodal(frames_dir, transcript_text, job.id, target_language=target_lang)
+                await _update_job(session, job, progress=56.0,
+                    log_message=f"✅ AI Summary ({len(summary)} chars): \"{summary[:100]}...\"", summary=summary)
+            except Exception as ve:
+                logger.warning(f"[Job {job.id}] Vision step failed: {ve}")
+                await _update_job(session, job, progress=56.0,
+                    log_message=f"⚠️ Vision step skipped: {str(ve)[:200]}")
+                summary = transcript_text[:1000]
+
             # ── Step 3: Rewrite Script with Kimi ──────────────────────
-            await _update_job(session, job, status=JobStatus.TRANSLATING, progress=55.0,
+            await _update_job(session, job, status=JobStatus.TRANSLATING, progress=58.0,
                 log_message=f"🧩 [Hermes → tool] rewrite_script(scenes=5, style=\"cinematic\")")
                 
             from backend.agent.tools import execute_tool
             import json
-            summary = transcript_text[:1000]
-            
-            # Map script_xx prefix to actual language names
-            lang_code = job.target_language.replace("script_", "") if job.target_language.startswith("script_") else "vi"
-            language_map = {"vi": "Vietnamese", "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean"}
-            target_lang = language_map.get(lang_code, "Vietnamese")
             
             await _update_job(session, job, progress=60.0,
                 log_message=f"📝 [Kimi K2.6] Analyzing content and rewriting script to {target_lang}...")

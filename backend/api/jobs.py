@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Job, JobStatus, Platform
 from backend.services.downloader import detect_platform
-from backend.workers.pipeline import run_pipeline, run_script_task
+from backend.workers.pipeline import run_pipeline, run_script_task, cancel_job_pipeline
 
 logger = logging.getLogger("content-bridge.api")
 
@@ -136,6 +137,34 @@ async def delete_job(job_id: int, db: AsyncSession = Depends(get_db)):
     return {"message": f"Job {job_id} deleted"}
 
 
+@router.post("/{job_id}/cancel")
+async def cancel_job(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a running job."""
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel job in state: {job.status}",
+        )
+
+    # Signal the pipeline to stop
+    cancel_job_pipeline(job_id)
+    
+    # Update status in DB immediately
+    job.status = JobStatus.CANCELLED
+    job.append_log("⏹ Job cancellation requested by user.")
+    
+    db.add(job)
+    await db.commit()
+    return {"message": f"Cancellation requested for job {job_id}"}
+
+
 @router.post("/{job_id}/retry", response_model=JobResponse)
 async def retry_job(
     job_id: int,
@@ -147,10 +176,10 @@ async def retry_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.status != JobStatus.FAILED:
+    if job.status not in (JobStatus.FAILED, JobStatus.CANCELLED):
         raise HTTPException(
             status_code=400,
-            detail=f"Can only retry failed jobs (current: {job.status})",
+            detail=f"Can only retry failed/cancelled jobs (current: {job.status})",
         )
 
     # Calculate progress based on existing artifacts
@@ -175,7 +204,11 @@ async def retry_job(
     await db.commit()
     await db.refresh(job)
 
-    background_tasks.add_task(run_pipeline, job.id)
+    # Auto-publish on retry if job has an X account assigned
+    should_publish = job.x_account_id is not None
+    background_tasks.add_task(run_pipeline, job.id, should_publish)
+
+
     return JobResponse(**job.to_dict())
 
 
@@ -238,6 +271,116 @@ async def update_job_fields(
         await db.refresh(job)
 
     return JobResponse(**job.to_dict())
+
+
+# ── Manual Publish to X ──────────────────────────────────────
+@router.post("/{job_id}/publish")
+async def publish_job_to_x(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually publish a completed job to X/Twitter."""
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.output_path:
+        raise HTTPException(status_code=400, detail="No rendered video. Complete pipeline first.")
+
+    from backend.models import XAccount
+    x_account = await db.get(XAccount, job.x_account_id) if job.x_account_id else None
+    if not x_account or not x_account.cookies_json:
+        raise HTTPException(status_code=400, detail="No X account assigned or cookies missing.")
+
+    import asyncio
+    asyncio.create_task(_run_publish(job_id))
+    return {"message": "Publishing to X started", "job_id": job_id}
+
+
+async def _run_publish(job_id: int):
+    """Background task: generate tweet text from summary + publish to X."""
+    from backend.database import async_session_factory
+    from backend.services.publisher import publish_to_x
+    from backend.models import XAccount
+    from backend.config import get_settings
+
+    async with async_session_factory() as session:
+        job = await session.get(Job, job_id)
+        if not job:
+            return
+
+        try:
+            # Generate tweet text using Kimi from summary
+            if not job.tweet_text:
+                job.append_log("📝 [Kimi K2.6] Generating tweet from summary...")
+                session.add(job)
+                await session.commit()
+
+                settings = get_settings()
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=settings.kimi_api_key, base_url=settings.kimi_base_url)
+
+                _lang = {"vi": "Vietnamese", "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean"}
+                lang_name = _lang.get(job.target_language[:2], job.target_language)
+
+                response = await client.chat.completions.create(
+                    model="kimi-k2.6",
+                    messages=[
+                        {"role": "system", "content": (
+                            f"Generate a short engaging tweet in {lang_name} for a translated video. "
+                            f"Include emojis and hashtags. Under 250 chars. No quotes."
+                        )},
+                        {"role": "user", "content": f"Title: {job.title}\nSummary: {(job.summary or '')[:500]}"},
+                    ],
+                    extra_body={"thinking": {"type": "disabled"}},
+                    max_tokens=200,
+                )
+                tweet_text = response.choices[0].message.content.strip().strip('"')
+                job.tweet_text = tweet_text
+                job.append_log(f'✅ Tweet: "{tweet_text[:80]}..."')
+            else:
+                tweet_text = job.tweet_text
+                job.append_log(f'📝 Using existing tweet: "{tweet_text[:60]}..."')
+
+            # Publish via Playwright
+            x_account = await session.get(XAccount, job.x_account_id)
+            x_cookies = x_account.cookies_json if x_account else None
+            label = f"@{x_account.username}" if x_account and x_account.username else "default"
+
+            job.append_log(f"🚀 [Playwright] Publishing via {label} → x.com...")
+            job.status = JobStatus.PUBLISHING
+            session.add(job)
+            await session.commit()
+
+            pub_result = await publish_to_x(job.output_path, tweet_text, job.id, x_cookies)
+
+            job.tweet_id = pub_result.get("tweet_id")
+            job.status = JobStatus.COMPLETED
+            job.append_log(f"🎉 Published! Tweet ID: {job.tweet_id}")
+            session.add(job)
+            await session.commit()
+
+        except Exception as e:
+            job.status = JobStatus.COMPLETED
+            job.append_log(f"❌ Publish failed: {str(e)[:200]}")
+            session.add(job)
+            await session.commit()
+
+
+# ── Serve Raw Video ──────────────────────────────────────────
+@router.get("/{job_id}/raw-video")
+async def get_raw_video(job_id: int, db: AsyncSession = Depends(get_db)):
+    """Serve the raw downloaded video for the job."""
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.video_path:
+        raise HTTPException(status_code=404, detail="Raw video not available")
+    
+    import os
+    if not os.path.exists(job.video_path):
+        raise HTTPException(status_code=404, detail="Video file not found on disk")
+        
+    return FileResponse(job.video_path, media_type="video/mp4")
 
 
 # ── Regenerate Cover (re-compose from existing scenes) ───────
