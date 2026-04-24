@@ -1,565 +1,412 @@
-# 🤖 Hermes Video Agent — Content Bridge
+# 🤖 Hermes Content Bridge
 
-> An autonomous AI video processing system powered by the **Hermes Agent** language model. It handles end-to-end workflows: video extraction, multilingual translation, OCR text replacement, subtitle burning, creative script rewriting, and cross-platform publishing — all orchestrated by an AI agent with tool-calling capabilities.
+An autonomous AI video pipeline that downloads, transcribes, translates, and publishes short-form videos to X/Twitter — orchestrated by the **Hermes Agent** via function-calling.
 
----
-
-## 📋 Table of Contents
-
-- [Architecture Overview](#-architecture-overview)
-- [What is Hermes?](#-what-is-hermes)
-- [Prerequisites](#-prerequisites)
-- [Installation (Local)](#-installation)
-- [Configuration](#-configuration)
-- [Running the App](#-running-the-app)
-- [Usage Guide](#-usage-guide)
-- [Deploy to VPS (Production)](#-deploy-to-vps-production)
-- [Tech Stack](#-tech-stack)
-- [Troubleshooting](#-troubleshooting)
+**Supported sources:** YouTube · TikTok · Douyin  
+**Supported languages:** Vietnamese · English · Chinese · Japanese · Korean
 
 ---
 
-## 🏗️ Architecture Overview
+## Table of Contents
 
-The system has **two modes**, both powered by the **Hermes AI Orchestrator**:
-
-### Mode 1: Full Pipeline (Video Translation & Publishing)
-```
-Video URL → Download (yt-dlp / Playwright)
-          → Transcribe Audio (Whisper — local, no API needed)
-          → Translate Subtitles (Kimi K2.6 AI)
-          → Detect & Replace On-Screen Text via OCR (EasyOCR + FFmpeg)
-          → Extract Keyframes & Generate AI Summary (Kimi Vision)
-          → Burn Dual-Language Subtitles (FFmpeg)
-          → Auto-Publish to X/Twitter (Playwright)
-```
-
-### Mode 2: Script Extractor (Creative Rewriting)
-```
-Video URL → Download → Transcribe → Extract Keyframes → AI Summary
-          → Kimi K2.6 Cinematic Script Rewrite (5 scenes + image prompts)
-```
-
-**Supported Platforms:** YouTube, TikTok, Douyin (Chinese TikTok)
-**Supported Languages:** Vietnamese, English, Chinese, Japanese, Korean
+- [How It Works](#how-it-works)
+- [What Is the Hermes Agent?](#what-is-the-hermes-agent)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running the App](#running-the-app)
+- [Using the Dashboard](#using-the-dashboard)
+- [BYOK (Bring Your Own Key)](#byok-bring-your-own-key)
+- [Tech Stack](#tech-stack)
+- [Deploy to VPS](#deploy-to-vps)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## 🧠 What is Hermes?
+## How It Works
 
-**Hermes 3** is an open-source large language model developed by [Nous Research](https://nousresearch.com/) that excels at **function calling** (tool use) and **agentic reasoning**. In this system, Hermes acts as the **brain** — the autonomous orchestrator that decides which tools to call, in what order, and how to handle errors.
-
-### How Hermes Works in This System
+### Full Pipeline
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                   HERMES AGENT                       │
-│  (AI Orchestrator — decides what to do next)         │
-│                                                      │
-│  System Prompt: "You are the Hermes Content Bridge   │
-│  Agent. You have access to these tools..."           │
-│                                                      │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐     │
-│  │ download   │  │ transcribe │  │ translate  │     │
-│  │ _video     │  │ _video     │  │ _content   │     │
-│  └────────────┘  └────────────┘  └────────────┘     │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐     │
-│  │ render_    │  │ publish_   │  │ rewrite_   │     │
-│  │ subtitles  │  │ to_x       │  │ script     │     │
-│  └────────────┘  └────────────┘  └────────────┘     │
-└──────────────────────────────────────────────────────┘
+Video URL
+  ↓ yt-dlp / Playwright (Douyin)
+  ↓ Whisper (local speech-to-text)
+  ↓ Kimi K2.6 (translation)
+  ↓ EasyOCR + FFmpeg (on-screen text replacement)
+  ↓ FFmpeg (keyframe extraction)
+  ↓ Kimi Vision (AI summary)
+  ↓ FFmpeg (subtitle burn)
+  ↓ Playwright (publish to X/Twitter)
 ```
 
-1. **System Prompt**: Hermes receives a detailed prompt defining its role and available tools (JSON function schemas)
-2. **Planning**: Given a user's video URL and target language, Hermes creates a plan: `download → transcribe → translate → render → publish`
-3. **Tool Execution**: At each step, Hermes generates a function call (e.g., `download_video(url="...")`), the system executes it, and returns the result
-4. **Adaptive Loop**: If a tool fails, Hermes can retry, skip, or suggest an alternative — it's not a hardcoded pipeline
+The entire flow runs in the background. The dashboard streams live logs and progress via WebSocket.
 
-### Hermes Provider Options
+### Script Extractor Mode
 
-You can run Hermes through different providers:
+Downloads and transcribes a video, then uses Kimi K2.6 to rewrite the content as a 5-scene cinematic script with image prompts — useful for repurposing content without publishing.
 
-| Provider | Model | Description |
-|----------|-------|-------------|
-| **Kimi** (Recommended) | `kimi-k2.6` | Moonshot AI's model — fast, multilingual, affordable. Powers translation, vision, and orchestration |
-| **OpenRouter** | `nousresearch/hermes-3-llama-3.1-405b` | The original Hermes 3 405B model via OpenRouter. Most capable but more expensive |
-| **Self-hosted** | Any OpenAI-compatible | Run your own Hermes via vLLM, Ollama, or any OpenAI-compatible server |
+### AI Cover Video (Optional)
 
-### Key Agent Files
-
-| File | Role |
-|------|------|
-| `backend/agent/hermes_agent.py` | Agent initialization, system prompt, and the agentic loop (plan → call tool → observe → repeat) |
-| `backend/agent/tools.py` | Tool definitions (JSON schemas) and execution handlers |
-| `backend/workers/pipeline.py` | Pipeline execution with real-time WebSocket progress updates |
+After a job completes, generate a short AI-illustrated cover video using FLUX (fal.ai) images composed with the original audio, Ken Burns effects, and translated subtitles.
 
 ---
 
-## ✅ Prerequisites
+## What Is the Hermes Agent?
 
-Before installing, make sure you have the following on your system:
+**Hermes** is an AI orchestrator that uses function-calling (tool use) to drive the pipeline. Instead of a hardcoded sequence of steps, Hermes is given a system prompt defining its role and a set of tools, then autonomously decides what to call and in what order.
 
-| Tool | Version | How to Install |
-|------|---------|----------------|
-| **Python** | 3.11+ | [python.org/downloads](https://www.python.org/downloads/) |
-| **Node.js** | 20+ | [nodejs.org](https://nodejs.org/) |
-| **FFmpeg** | Latest | Windows: [gyan.dev/ffmpeg](https://www.gyan.dev/ffmpeg/builds/) — add to PATH<br>Linux: `sudo apt install ffmpeg` |
-| **Git** | Latest | [git-scm.com](https://git-scm.com/) |
+```
+User submits URL
+    │
+    ▼
+Hermes Agent (Kimi K2.6 or Hermes 3 via OpenRouter)
+    │
+    ├─ calls download_video(url)
+    ├─ calls transcribe_video(job_id)
+    ├─ calls translate_content(job_id, target_language)
+    ├─ calls render_with_subtitles(job_id)
+    └─ calls publish_to_x(job_id)        ← only if auto-publish enabled
+```
 
-### Verify Installation
+Each tool call result is returned to the agent. If a step fails, Hermes can observe the error and adapt (retry, skip, report).
+
+### Agent Provider Options
+
+| Provider | When to Use |
+|----------|-------------|
+| **Kimi K2.6** (default) | Simplest setup. One API key powers translation, vision, summary, tweet generation, and orchestration |
+| **OpenRouter — Hermes 3 405B** | Use the original Hermes 3 model for orchestration. Requires an OpenRouter key |
+| **Custom / Self-hosted** | Any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio) |
+
+Switch providers in the **Settings** page of the dashboard without editing any files.
+
+---
+
+## Prerequisites
+
+| Tool | Version | Notes |
+|------|---------|-------|
+| Python | 3.11+ | |
+| Node.js | 20+ | |
+| FFmpeg | Any recent | Must be on PATH |
+| Git | Any | |
+
 ```bash
-python --version    # Should show 3.11+
-node --version      # Should show v20+
-ffmpeg -version     # Should show version info
-git --version       # Should show version info
+python --version   # 3.11+
+node --version     # v20+
+ffmpeg -version    # any version line
 ```
 
 ---
 
-## 🚀 Installation
+## Installation
 
-### Step 1: Clone the Repository
+### 1. Clone
+
 ```bash
 git clone https://github.com/ntclick/hermes-video-agent.git
 cd hermes-video-agent
 ```
 
-### Step 2: Set Up Python Backend
+### 2. Python backend
+
 ```bash
-# Create virtual environment
+# Create and activate virtual environment
 python -m venv venv
 
-# Activate it
-# Windows:
+# Windows
 venv\Scripts\activate
-# Linux/Mac:
+# Linux / Mac
 source venv/bin/activate
 
-# Install Python dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# Install Playwright browsers (needed for Douyin download & X publishing)
+# Install Playwright browser (needed for Douyin download + X publishing)
 playwright install chromium
 ```
 
-### Step 3: Set Up Next.js Frontend
+### 3. Frontend
+
 ```bash
 cd frontend
 npm install
 cd ..
 ```
 
-### Step 4: Install the Hermes Agent Framework
+### 4. Environment file
 
-The Hermes agent is built into the codebase — no separate installation needed. It uses the **OpenAI Python SDK** (already in `requirements.txt`) to communicate with your chosen AI provider via the standard Chat Completions API with function calling.
-
-If you want to run the original **Hermes 3 model locally** (optional, advanced):
-```bash
-# Option A: Via Ollama (easiest for local hosting)
-curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull hermes3
-
-# Then set in .env:
-# HERMES_PROVIDER=custom
-# HERMES_API_KEY=ollama
-# HERMES_BASE_URL=http://localhost:11434/v1
-# HERMES_MODEL=hermes3
-
-# Option B: Via OpenRouter (cloud, no GPU needed)
-# Get an API key at https://openrouter.ai
-# Then set in .env:
-# HERMES_PROVIDER=openrouter
-# HERMES_API_KEY=your_openrouter_key
-# HERMES_BASE_URL=https://openrouter.ai/api/v1
-# HERMES_MODEL=nousresearch/hermes-3-llama-3.1-405b
-```
-
-> **Note:** By default, the system uses **Kimi K2.6** as both the orchestrator and the translation/vision engine. This is the recommended setup because Kimi handles all tasks (translation, OCR, vision summary, script rewriting) in a single provider. You only need a Kimi API key to get started.
-
----
-
-## 🔑 Configuration
-
-### Step 1: Create your `.env` file
 ```bash
 cp .env.example .env
 ```
 
-### Step 2: Get API Keys
-
-You need **at least one** AI provider API key to run the pipeline:
-
-| Variable | Required? | Description | Where to Get |
-|----------|-----------|-------------|--------------|
-| `KIMI_API_KEY` | ✅ **Required** | Kimi K2.6 — powers translation, OCR text replacement, tweet generation, and multimodal vision | [platform.moonshot.cn](https://platform.moonshot.cn) (Free tier available) |
-| `HERMES_API_KEY` | Optional | Hermes 3 agent orchestration via OpenRouter (only if you want to use Hermes 3 instead of Kimi) | [openrouter.ai](https://openrouter.ai) |
-| `FAL_API_KEY` | Optional | AI cover image generation via Flux | [fal.ai](https://fal.ai) |
-
-### Step 3: Edit your `.env` file
-
-Open `.env` in any text editor and fill in your keys:
+Open `.env` and fill in at minimum:
 
 ```env
-# --- REQUIRED: Kimi AI (Translation + Vision + OCR + Orchestration) ---
-KIMI_API_KEY=your_kimi_api_key_here
-KIMI_BASE_URL=https://api.moonshot.cn/v1
-
-# --- Hermes Agent Provider ---
-# "kimi" = Use Kimi for everything (recommended, simplest setup)
-# "openrouter" = Use Hermes 3 via OpenRouter for orchestration
-# "custom" = Use your own self-hosted model
-HERMES_PROVIDER=kimi
-HERMES_MODEL=kimi-k2.6
-
-# --- App Settings ---
-APP_HOST=0.0.0.0
-APP_PORT=8000
-LOG_LEVEL=INFO
-
-# --- Whisper (local speech-to-text, runs entirely on your machine, no API key needed) ---
-# Options: tiny, base, small, medium, large-v3
-# "base" is recommended for speed vs accuracy balance
-WHISPER_MODEL=base
+KIMI_API_KEY=your_kimi_key_here
 ```
 
-### Optional: X/Twitter Auto-Publishing
-
-To enable automatic posting to X, configure X account cookies through the web dashboard (Settings page) after starting the app. No manual `.env` editing needed.
-
-### Optional: Douyin (Chinese TikTok) Support
-
-Douyin requires browser cookies to bypass anti-bot protection. Paste Netscape-format cookies in the Settings page of the dashboard.
+See [Configuration](#configuration) for all options.
 
 ---
 
-## ▶️ Running the App
+## Configuration
 
-### Quick Start (Windows)
+### Minimal `.env` (Kimi only)
+
+```env
+# Kimi K2.6 — powers translation, vision, summary, and agent orchestration
+KIMI_API_KEY=your_key_here
+KIMI_BASE_URL=https://api.moonshot.cn/v1
+
+# Hermes agent uses Kimi by default
+HERMES_PROVIDER=kimi
+HERMES_MODEL=kimi-k2.6
+
+# Whisper model size: tiny / base / small / medium / large-v3
+# "base" recommended — good accuracy, ~140MB download on first run
+WHISPER_MODEL=base
+```
+
+Get a Kimi API key at [platform.moonshot.cn](https://platform.moonshot.cn). Free tier is available.
+
+### Using Hermes 3 via OpenRouter (optional)
+
+```env
+HERMES_PROVIDER=openrouter
+HERMES_API_KEY=your_openrouter_key
+HERMES_BASE_URL=https://openrouter.ai/api/v1
+HERMES_MODEL=nousresearch/hermes-3-llama-3.1-405b
+
+# Still need Kimi for translation and vision
+KIMI_API_KEY=your_kimi_key
+```
+
+### Self-hosted model (Ollama, vLLM, etc.)
+
+```env
+HERMES_PROVIDER=custom
+HERMES_API_KEY=any_value
+HERMES_BASE_URL=http://localhost:11434/v1
+HERMES_MODEL=hermes3
+```
+
+### Optional keys
+
+| Variable | Purpose |
+|----------|---------|
+| `FAL_API_KEY` | AI cover video image generation (FLUX via fal.ai) |
+
+X account cookies and Douyin cookies are configured in the **Settings page** of the dashboard — no `.env` editing needed.
+
+---
+
+## Running the App
+
+### Windows (one command)
+
 ```powershell
 python start_windows.py
 ```
-This launches both the backend API (port 8000) and frontend dashboard (port 3000) simultaneously.
 
-### Manual Start (Any OS)
+### Any OS (two terminals)
+
 ```bash
-# Terminal 1: Start Backend API
+# Terminal 1 — backend API (port 8000)
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
-# Terminal 2: Start Frontend Dashboard
+# Terminal 2 — frontend dashboard (port 3000)
 cd frontend
 npm run dev
 ```
 
-### Open the Dashboard
-Navigate to **[http://localhost:3000](http://localhost:3000)** in your browser.
+Open **http://localhost:3000** in your browser.
 
 ---
 
-## 📖 Usage Guide
+## Using the Dashboard
 
-### Full Pipeline (Translate & Publish Videos)
+### Starting a Job
 
-1. Open the dashboard at `http://localhost:3000`
-2. Click **🎬 Full Pipeline** in the top navigation
-3. Paste a YouTube / TikTok / Douyin video URL
-4. Select your **target language** (e.g., English, Vietnamese)
-5. Optionally toggle **Auto-post** and select an X account
-6. Click **Start Hermes** → The AI agent will:
-   - Download the video
-   - Transcribe spoken audio with Whisper (locally, no API)
-   - Translate subtitles to your chosen language
-   - Detect and blur/replace hardcoded on-screen text (EasyOCR)
-   - Extract keyframes and generate an AI summary
-   - Burn dual-language subtitles into the video
-   - Optionally auto-publish to X/Twitter
-7. Watch the **Live Logs** tab to see the agent's real-time decision-making
-8. Download the final video or view it directly in the dashboard
+1. Paste a YouTube, TikTok, or Douyin URL
+2. Choose a target language
+3. Toggle **Auto-post** and select an X account if you want automatic publishing
+4. Click **Start Hermes**
 
-### Script Extractor (Creative Mode)
+### Overview Tab
 
-1. Click **📝 Script Extractor** in the top navigation
-2. Paste a video URL and select language
-3. Click **Extract Script** → Hermes will:
-   - Download and transcribe the video
-   - Extract keyframes and create an AI visual summary
-   - Rewrite the content into 5 cinematic scenes with narration and AI image prompts
-4. View the original video, AI summary, keyframes, and rewritten script in the Overview tab
+Shows the full status of the selected job:
+
+- **Pipeline progress** bar with stage labels
+- **Hermes Agent** card — current tool being called and which service handles it
+- **Keyframes** — extracted video frames (click to enlarge)
+- **AI Summary** — multimodal summary generated from keyframes + transcript
+- **Post to X** section:
+  - If already posted: shows tweet link
+  - If not posted: editable caption, account selector, and **Post to X** button
+
+### Video Tab
+
+Plays the rendered output video (with burned subtitles) and the AI cover video if generated.
+
+### Logs Tab
+
+Real-time streaming logs from the Hermes agent — every tool call, API response, and pipeline decision.
+
+### Manual Publish
+
+If you ran a job without auto-publish, or want to post to a different account:
+
+1. Open a completed job → Overview tab
+2. Edit the caption if needed
+3. Select an X account from the dropdown
+4. Click **🚀 Post to X**
+
+Hermes will generate a tweet caption from the AI summary (if none exists) and publish via Playwright.
+
+### AI Cover Video
+
+Available on completed jobs that have an AI summary:
+
+- **Generate AI Cover** — rewrites content into 5 scenes, generates FLUX images, composes video with original audio
+- **Re-compose Cover** — reuses existing scenes, re-renders the video
+- **Rewrite Cover** — new Kimi script + new FLUX images
 
 ---
 
-## 📦 Tech Stack
+## BYOK (Bring Your Own Key)
+
+You can provide API keys per-session via the **Settings page** in the dashboard instead of `.env`. Keys are stored in browser `localStorage` only — never sent to or stored on the server (except transiently during a running job, then cleared).
+
+This allows multiple users with different API keys to share one deployment.
+
+Keys that can be provided via BYOK:
+
+| Key | Purpose |
+|-----|---------|
+| Kimi API Key | Translation, vision, summary |
+| Hermes API Key | Agent orchestration (if using OpenRouter) |
+| FAL API Key | AI cover image generation |
+| Douyin Cookies | Douyin video download |
+| X Cookies | X/Twitter publishing |
+
+---
+
+## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| **AI Agent** | Hermes 3 (Nous Research) / Kimi K2.6 (Moonshot AI) — function calling orchestration |
-| **Backend** | Python 3.12, FastAPI, SQLAlchemy (async), SQLite |
-| **Frontend** | Next.js 15, React 19, TypeScript |
-| **Speech-to-Text** | Whisper (OpenAI, runs locally — no API key needed) |
-| **OCR** | EasyOCR (runs locally — no API key needed) |
-| **Video Processing** | FFmpeg (subtitle burning, OCR box-blur, re-encoding) |
-| **Download** | yt-dlp, Playwright (Douyin anti-bot bypass) |
-| **Publishing** | Playwright (automated X/Twitter posting) |
-| **Process Manager** | PM2 (production), Caddy (reverse proxy + SSL) |
+| AI Agent | Kimi K2.6 / Hermes 3 (function-calling) |
+| Backend | Python 3.11+, FastAPI, SQLAlchemy async, SQLite |
+| Frontend | Next.js 15, React 19, TypeScript |
+| Speech-to-Text | OpenAI Whisper (runs locally, no API key) |
+| OCR | EasyOCR (runs locally, no API key) |
+| Video | FFmpeg — subtitle burn, keyframe extraction, re-encoding |
+| Download | yt-dlp (YouTube/TikTok), Playwright (Douyin) |
+| AI Images | fal.ai FLUX (AI cover generation) |
+| Publishing | Playwright (headless Chromium → X/Twitter) |
+| Real-time | WebSocket (live log streaming) |
+| Process Manager | PM2 (production) |
 
 ---
 
-## 🐛 Troubleshooting
+## Deploy to VPS
 
-### "FFmpeg not found"
-Make sure FFmpeg is installed and added to your system PATH:
-```bash
-ffmpeg -version
-```
-Windows: Download from [gyan.dev/ffmpeg](https://www.gyan.dev/ffmpeg/builds/) and add the `bin` folder to your PATH environment variable.
+### Requirements
 
-### "Whisper model download slow"
-The first run downloads the Whisper model (~140MB for `base`). This is cached after the first download. If it's slow, try using `tiny` model in your `.env`:
-```
-WHISPER_MODEL=tiny
-```
+| | Minimum | Recommended |
+|---|---|---|
+| CPU | 2 cores | 4+ cores |
+| RAM | 4 GB | 8 GB |
+| Disk | 20 GB | 50 GB |
+| OS | Ubuntu 20.04+ | Ubuntu 22.04 |
 
-### "EasyOCR is very slow"
-EasyOCR uses PyTorch and runs on CPU by default. On a machine without GPU, OCR processing can take 3-5 minutes per video. The system will still produce subtitled videos even if OCR is slow — it's non-blocking.
-
-### "Douyin download fails"
-Douyin aggressively blocks automated access. Solutions:
-1. Add fresh browser cookies via the Settings page in the dashboard
-2. Try a different Douyin URL format (use `/video/ID` instead of modal links)
-
-### "X/Twitter publishing fails"
-1. Make sure you've added X account cookies via Settings
-2. Cookies expire — re-add them if publishing suddenly stops working
-3. Check the Live Logs tab for detailed error messages
-
-### "Kimi API errors"
-1. Verify your API key is correct in `.env`
-2. Check your Kimi account balance at [platform.moonshot.cn](https://platform.moonshot.cn)
-3. The system auto-retries failed API calls, check logs for details
-
-### Windows: "NotImplementedError" on asyncio
-This is automatically handled by the app. If you still see it, make sure you're using Python 3.11+.
-
----
-
-## 🚀 Deploy to VPS (Production)
-
-This section guides you through deploying the system on your own Linux VPS so it runs 24/7.
-
-### Minimum VPS Requirements
-
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| **CPU** | 2 cores | 4+ cores |
-| **RAM** | 4 GB | 8+ GB |
-| **Disk** | 20 GB free | 50+ GB |
-| **OS** | Ubuntu 20.04+ / Debian 11+ | Ubuntu 22.04 |
-
-> **Note:** EasyOCR (PyTorch) and FFmpeg are CPU-intensive. More cores = faster video processing. No GPU required.
-
-### Step 1: Prepare the VPS
-
-SSH into your server and install system dependencies:
+### Setup
 
 ```bash
-ssh root@YOUR_VPS_IP
-
-# Update system
+# System packages
 apt update && apt upgrade -y
-
-# Install Python 3.12, Node.js 20, FFmpeg, and build tools
 apt install -y python3.12 python3.12-venv python3-pip ffmpeg git curl
 
-# Install Node.js 20 via NodeSource
+# Node.js 20
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 
-# Install PM2 (process manager — keeps app running after SSH disconnect)
+# PM2
 npm install -g pm2
 
-# Install Playwright system dependencies
+# Playwright deps
 npx playwright install-deps chromium
-```
 
-### Step 2: Clone & Set Up the Project
-
-```bash
-# Clone the repo
+# Project
 cd /opt
 git clone https://github.com/ntclick/hermes-video-agent.git content-bridge
 cd content-bridge
 
-# Python virtual environment
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 
-# Frontend
-cd frontend
-npm install
-npm run build   # Production build (required for PM2)
-cd ..
-```
+cd frontend && npm install && npm run build && cd ..
 
-### Step 3: Configure Environment
-
-```bash
 cp .env.example .env
-nano .env   # Fill in your API keys (see Configuration section above)
+nano .env   # add your KIMI_API_KEY
 ```
 
-Important `.env` values for VPS:
-```env
-KIMI_API_KEY=your_key_here
-HERMES_PROVIDER=kimi
-APP_HOST=0.0.0.0
-APP_PORT=8000
-DATA_DIR=/opt/content-bridge/data
-WHISPER_MODEL=base
-```
-
-### Step 4: Create PM2 Ecosystem File
+### Start with PM2
 
 ```bash
-cat > ecosystem.config.js << 'EOF'
-module.exports = {
-  apps: [
-    {
-      name: 'content-bridge-api',
-      cwd: '/opt/content-bridge',
-      script: '/opt/content-bridge/venv/bin/uvicorn',
-      args: 'backend.main:app --host 0.0.0.0 --port 8000 --workers 2',
-      interpreter: 'none',
-      env: { PYTHONPATH: '/opt/content-bridge' },
-      max_memory_restart: '2G',
-    },
-    {
-      name: 'content-bridge-frontend',
-      cwd: '/opt/content-bridge/frontend',
-      script: 'npm',
-      args: 'start -- --port 3000 --hostname 0.0.0.0',
-      interpreter: 'none',
-      env: { NODE_ENV: 'production' },
-      max_memory_restart: '512M',
-    },
-  ],
-};
-EOF
-```
-
-### Step 5: Start the Services
-
-```bash
-# Start both backend and frontend
 pm2 start ecosystem.config.js
-
-# Save PM2 config (auto-start on reboot)
 pm2 save
-pm2 startup   # Follow the printed command to enable auto-start
-
-# Check status
-pm2 list
-pm2 logs       # View live logs (Ctrl+C to exit)
+pm2 startup   # follow printed command to enable auto-start
 ```
 
-Your app is now running at:
-- **Frontend:** `http://YOUR_VPS_IP:3000`
-- **Backend API:** `http://YOUR_VPS_IP:8000`
-
-### Step 6: Set Up HTTPS with Caddy (Optional but Recommended)
-
-```bash
-# Install Caddy
-apt install -y debian-keyring debian-archive-keyring apt-transport-https
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt update && apt install caddy
-```
-
-Create Caddy config:
-```bash
-cat > /etc/caddy/Caddyfile << 'EOF'
-your-domain.com {
-  encode gzip
-
-  # API & WebSocket → Backend
-  reverse_proxy /api/* 127.0.0.1:8000
-  reverse_proxy /ws/*  127.0.0.1:8000
-  reverse_proxy /health 127.0.0.1:8000
-
-  # Everything else → Frontend
-  reverse_proxy 127.0.0.1:3000
-}
-EOF
-
-systemctl restart caddy
-```
-
-Replace `your-domain.com` with your actual domain. Caddy auto-generates SSL certificates.
-
-No domain? Use the free `sslip.io` trick:
-```
-YOUR_IP.sslip.io {
-  ...
-}
-```
-Example: `103-142-24-60.sslip.io`
-
-### Updating the Code (Sync from GitHub)
-
-When you push new code to GitHub, update the VPS:
+### Update
 
 ```bash
 cd /opt/content-bridge
 git pull origin main
-
-# Reinstall dependencies if requirements changed
 source venv/bin/activate
 pip install -r requirements.txt
-
-# Rebuild frontend if UI changed
 cd frontend && npm run build && cd ..
-
-# Restart services
 pm2 restart all
 ```
 
-### Quick One-Liner Deploy Script
+### HTTPS with Caddy (optional)
 
-Create a deploy script on your VPS for convenience:
-
-```bash
-cat > /opt/content-bridge/deploy.sh << 'SCRIPT'
-#!/bin/bash
-set -e
-cd /opt/content-bridge
-echo "📥 Pulling latest code..."
-git pull origin main
-source venv/bin/activate
-pip install -q -r requirements.txt
-cd frontend && npm run build && cd ..
-pm2 restart all
-echo "✅ Deploy complete!"
-SCRIPT
-chmod +x /opt/content-bridge/deploy.sh
 ```
-
-Then deploy anytime with:
-```bash
-bash /opt/content-bridge/deploy.sh
+your-domain.com {
+  reverse_proxy /api/* 127.0.0.1:8000
+  reverse_proxy /ws/*  127.0.0.1:8000
+  reverse_proxy        127.0.0.1:3000
+}
 ```
 
 ---
 
-## 🔒 Security Notes
+## Troubleshooting
 
-- All API keys are stored server-side in `.env` and never exposed to the frontend
-- The dashboard is designed for local/internal use
-- For public deployment, add authentication (e.g., Caddy Basic Auth, Cloudflare Access)
-- X account cookies are stored encrypted in the local SQLite database
+**FFmpeg not found**  
+Add FFmpeg to your PATH. On Windows download from [gyan.dev/ffmpeg](https://www.gyan.dev/ffmpeg/builds/).
+
+**Whisper slow on first run**  
+It downloads the model (~140 MB for `base`) once. Use `WHISPER_MODEL=tiny` for faster but less accurate transcription.
+
+**Douyin download fails**  
+Add fresh browser cookies via Settings. Use the `/video/ID` URL format, not modal links.
+
+**X/Twitter publish fails**  
+Cookies expire. Re-paste them in Settings → X Accounts. Check the Logs tab for the specific error.
+
+**EasyOCR slow**  
+Runs on CPU — 2–5 minutes per video is normal. OCR is non-blocking; the pipeline continues even if it's slow.
+
+**`Could not copy Chrome cookie database`**  
+Your system `yt-dlp` config has `--cookies-from-browser chrome`. The app runs `yt-dlp --no-config` to avoid this, so restarting the backend after pulling the latest code should fix it.
 
 ---
 
-## 📄 License
+## License
 
 MIT

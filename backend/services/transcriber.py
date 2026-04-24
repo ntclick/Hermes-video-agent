@@ -14,6 +14,30 @@ logger = logging.getLogger("content-bridge.transcriber")
 _whisper_model = None
 
 
+def _get_whisper_device() -> str:
+    """
+    Return 'cuda' if the GPU is compatible with the installed PyTorch build,
+    otherwise fall back to 'cpu'. RTX 5000-series (sm_120+) requires PyTorch
+    nightly with CUDA 12.8+; the stable release only covers up to sm_90.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return "cpu"
+        cc_major, cc_minor = torch.cuda.get_device_capability(0)
+        cc = cc_major * 10 + cc_minor  # e.g. 12.0 → 120
+        # Stable PyTorch supports up to sm_90; anything higher needs nightly
+        if cc > 90:
+            logger.warning(
+                f"GPU compute capability sm_{cc_major}{cc_minor} is not supported "
+                f"by this PyTorch build (max sm_90). Falling back to CPU for Whisper."
+            )
+            return "cpu"
+        return "cuda"
+    except Exception:
+        return "cpu"
+
+
 def _get_whisper_model():
     """Load Whisper model lazily (first call takes time)."""
     global _whisper_model
@@ -21,9 +45,10 @@ def _get_whisper_model():
         import whisper
         settings = get_settings()
         model_name = settings.whisper_model
-        logger.info(f"Loading Whisper model: {model_name}")
-        _whisper_model = whisper.load_model(model_name)
-        logger.info(f"Whisper model '{model_name}' loaded successfully")
+        device = _get_whisper_device()
+        logger.info(f"Loading Whisper model: {model_name} on {device.upper()}")
+        _whisper_model = whisper.load_model(model_name, device=device)
+        logger.info(f"Whisper model '{model_name}' loaded successfully on {device.upper()}")
     return _whisper_model
 
 

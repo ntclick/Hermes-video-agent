@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # --- Douyin ---
     douyin_cookies: str = ""
 
+    # --- YouTube ---
+    youtube_cookies: str = ""  # Netscape cookie file content to bypass 429
+
     # --- App ---
     app_host: str = "0.0.0.0"
     app_port: int = 8000
@@ -135,7 +138,7 @@ def get_job_settings(user_keys_json: str | None = None) -> Settings:
     overrides = {}
     for field_name in [
         "kimi_api_key", "hermes_api_key", "fal_api_key",
-        "hermes_provider", "hermes_model", "douyin_cookies",
+        "hermes_provider", "hermes_model", "douyin_cookies", "youtube_cookies",
     ]:
         if field_name in user_keys and user_keys[field_name]:
             overrides[field_name] = user_keys[field_name]
@@ -153,6 +156,7 @@ def get_job_settings(user_keys_json: str | None = None) -> Settings:
         "hermes_model": base.hermes_model,
         "fal_api_key": base.fal_api_key,
         "douyin_cookies": base.douyin_cookies,
+        "youtube_cookies": base.youtube_cookies,
         "whisper_model": base.whisper_model,
         "data_dir": base.data_dir,
         "app_host": base.app_host,

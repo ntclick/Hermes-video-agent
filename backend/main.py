@@ -9,6 +9,15 @@ import asyncio
 # Note: This is only needed for local Windows dev; VPS (Linux) handles this natively.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
+    # Workaround for newer NVIDIA GPUs (e.g., Blackwell RTX 5000 series)
+    # PyTorch wheels lack cuDNN kernels for sm_120, causing EasyOCR to crash.
+    # Disabling cuDNN forces native PyTorch CUDA kernels (with PTX JIT fallback).
+    try:
+        import torch
+        torch.backends.cudnn.enabled = False
+    except ImportError:
+        pass
 
 import json
 import logging

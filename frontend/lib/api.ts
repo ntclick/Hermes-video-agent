@@ -66,6 +66,7 @@ export interface Job {
   summary: string | null;
   transcript: string | null;
   frames_path: string | null;
+  output_path: string | null;
   x_account_id: number | null;
   cover_path: string | null;
   ai_scenes_path: string | null;
@@ -173,8 +174,13 @@ export async function deleteJob(id: number): Promise<void> {
   removeLocalJobId(id);
 }
 
-export async function publishJob(id: number): Promise<{ message: string }> {
-  const res = await fetch(`${API_BASE}/api/jobs/${id}/publish`, { method: 'POST' });
+export async function publishJob(id: number, xAccountId?: number): Promise<{ message: string }> {
+  const body = xAccountId != null ? JSON.stringify({ x_account_id: xAccountId }) : undefined;
+  const res = await fetch(`${API_BASE}/api/jobs/${id}/publish`, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body,
+  });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || `Failed to publish: ${res.statusText}`);

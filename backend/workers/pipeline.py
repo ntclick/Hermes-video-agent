@@ -157,9 +157,39 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
 
             # ── Step 1: Download ──────────────────────────────────────
             if await check_cancellation(session, job): return
+
+            cached_video_ok = False
             if job.video_path:
                 import os
-                size_mb = os.path.getsize(job.video_path) / (1024*1024) if os.path.exists(job.video_path) else 0
+                if os.path.exists(job.video_path):
+                    size_mb = os.path.getsize(job.video_path) / (1024 * 1024)
+                    # Validate: run ffprobe to confirm the file has a real video stream.
+                    # Files < 1MB are almost certainly corrupt partial downloads.
+                    if size_mb >= 1.0:
+                        try:
+                            probe_proc = await asyncio.create_subprocess_exec(
+                                "ffprobe", "-v", "error",
+                                "-select_streams", "v:0",
+                                "-show_entries", "stream=codec_name",
+                                "-of", "compact=p=0",
+                                job.video_path,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            probe_out, _ = await probe_proc.communicate()
+                            cached_video_ok = bool(probe_out.decode().strip())
+                        except Exception:
+                            cached_video_ok = True  # ffprobe unavailable — trust the file
+                    if not cached_video_ok:
+                        await _update_job(session, job, status=JobStatus.DOWNLOADING, progress=5.0,
+                            log_message=f"⚠️ Cached video invalid or too small ({size_mb:.1f}MB), re-downloading…",
+                            video_path=None, audio_path=None, transcript=None,
+                            translation=None, subtitle_path=None, output_path=None)
+                        job.video_path = None
+
+            if job.video_path and cached_video_ok:
+                import os
+                size_mb = os.path.getsize(job.video_path) / (1024 * 1024)
                 await _update_job(session, job, status=JobStatus.DOWNLOADING, progress=20.0,
                     log_message=f"⏩ Skipping download (cached: {job.title}, {size_mb:.1f}MB)")
                 dl_video_path = job.video_path
@@ -245,7 +275,6 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                     frame_count = len([f for f in os.listdir(frames_dir) if f.endswith('.jpg')]) if os.path.exists(frames_dir) else 0
                     await _update_job(session, job, progress=67.0,
                         log_message=f"✅ Extracted {frame_count} keyframes → {frames_dir}", frames_path=frames_dir)
-                    
                     await _update_job(session, job, progress=68.0,
                         log_message=f"🧠 [Kimi K2.5 Vision] Sending {frame_count} images + transcript for multimodal summary...")
                     summary = await summarize_multimodal(frames_dir, transcript_text, job.id, target_language=job.target_language)
@@ -254,15 +283,32 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
                 except Exception as ve:
                     logger.warning(f"[Job {job.id}] Vision step failed: {ve}")
                     await _update_job(session, job, progress=69.0,
-                        log_message=f"⚠️ Vision step skipped: {str(ve)[:200]}")
+                        log_message=f"⚠️ Vision failed ({str(ve)[:120]}), using transcript as summary")
+                    # Fallback: dùng transcript thay summary để luôn có data
+                    fallback = transcript_text[:800].strip()
+                    if fallback:
+                        await _update_job(session, job, summary=fallback)
 
             # ── Step 4: Generate Subtitles ────────────────────────────
             if await check_cancellation(session, job): return
             if job.subtitle_path:
                 srt_path = job.subtitle_path
-                ass_path = srt_path.replace(".srt", ".ass")
-                await _update_job(session, job, progress=75.0,
-                    log_message=f"⏩ Skipping subtitles (cached: {srt_path})")
+                _derived_ass = srt_path.replace(".srt", ".ass")
+                import os as _os
+                if _os.path.exists(_derived_ass):
+                    ass_path = _derived_ass
+                    await _update_job(session, job, progress=75.0,
+                        log_message=f"⏩ Skipping subtitles (cached: {srt_path})")
+                else:
+                    # .ass file missing (e.g. after server restart/retry) — regenerate from cached translated data
+                    await _update_job(session, job, progress=69.5,
+                        log_message=f"⚠️ Cached .ass missing, regenerating subtitles from cached SRT data...")
+                    await _update_job(session, job, progress=70.0,
+                        log_message=f"📝 [Subtitle Engine] Generating SRT + ASS dual-language subtitles...")
+                    srt_path, ass_path = generate_dual_subtitles(translated, job.id)
+                    await _update_job(session, job, progress=75.0,
+                        log_message=f"✅ Subtitles regenerated: SRT → {srt_path} | ASS → {ass_path}",
+                        subtitle_path=srt_path)
             else:
                 await _update_job(session, job, progress=69.5,
                     log_message=f"🧩 [Hermes → tool] generate_subtitles(format=\"SRT+ASS\", dual_language=True)")
@@ -341,7 +387,28 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
 
                 x_account = await session.get(XAccount, job.x_account_id) if job.x_account_id else None
                 x_cookies_json = x_account.cookies_json if x_account else None
-                account_label = f"@{x_account.username}" if x_account and x_account.username else "default cookies"
+
+                # Fallback: check BYOK user_keys_json for x_cookies_json
+                if not x_cookies_json and job.user_keys_json:
+                    try:
+                        import json as _json
+                        _user_keys = _json.loads(job.user_keys_json)
+                        x_cookies_json = _user_keys.get("x_cookies_json")
+                        if x_cookies_json:
+                            logger.info(f"[Job {job.id}] Using BYOK x_cookies_json from user_keys")
+                    except Exception:
+                        pass
+
+                # Last fallback: first account in DB
+                if not x_cookies_json:
+                    from sqlalchemy import select as _select
+                    first_acc = (await session.execute(_select(XAccount).limit(1))).scalars().first()
+                    if first_acc and first_acc.cookies_json:
+                        x_cookies_json = first_acc.cookies_json
+                        x_account = first_acc
+                        logger.info(f"[Job {job.id}] Falling back to first DB account: @{first_acc.username}")
+
+                account_label = f"@{x_account.username}" if x_account and x_account.username else "X account"
 
                 await _update_job(session, job, progress=95.0,
                     log_message=f"🚀 [Playwright] Publishing via {account_label} → x.com/compose/tweet...")

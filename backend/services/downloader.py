@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -184,18 +185,90 @@ def _parse_cookies_to_playwright(cookie_text: str) -> list[dict]:
 
 # ── Main Download Function ────────────────────────────────────
 
+async def _try_ytdlp_douyin(url: str, job_id: int, output_dir: Path, cookie_file: str | None) -> dict | None:
+    """
+    Attempt yt-dlp download for Douyin with a Netscape cookie file.
+    Returns result dict on success, None on failure.
+    """
+    output_template = str(output_dir / "%(title).80s.%(ext)s")
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--format", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "--output", output_template,
+        "--write-info-json",
+        "--no-overwrites",
+        "--socket-timeout", "30",
+        "--retries", "3",
+        "--user-agent", ua,
+        "--add-header", f"Referer:https://www.douyin.com/",
+    ]
+    if cookie_file:
+        cmd += ["--cookies", cookie_file]
+    cmd.append(url)
+
+    logger.info(f"[Job {job_id}] 🔧 Trying yt-dlp with cookies: {' '.join(cmd[:6])}...")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err = (stderr or stdout).decode("utf-8", errors="replace")
+        logger.warning(f"[Job {job_id}] yt-dlp failed for Douyin: {err[:300]}")
+        return None
+
+    video_files = list(output_dir.glob("*.mp4"))
+    if not video_files:
+        video_files = list(output_dir.glob("*.mkv")) + list(output_dir.glob("*.webm"))
+    if not video_files:
+        logger.warning(f"[Job {job_id}] yt-dlp succeeded but no video file found")
+        return None
+
+    video_path = video_files[0]
+    info_files = list(output_dir.glob("*.info.json"))
+    title = video_path.stem
+    duration = None
+    thumbnail_url = None
+    if info_files:
+        try:
+            with open(info_files[0], "r", encoding="utf-8") as f:
+                info = json.load(f)
+            title = info.get("title", title)
+            duration = info.get("duration")
+            thumbnail_url = info.get("thumbnail")
+        except Exception:
+            pass
+
+    logger.info(f"[Job {job_id}] ✅ yt-dlp Douyin success: {title}")
+    return {"video_path": str(video_path), "title": title, "duration": duration, "thumbnail_url": thumbnail_url, "platform": Platform.DOUYIN}
+
+
 async def _download_douyin_direct(url: str, job_id: int, output_dir: Path, settings) -> dict:
     """
-    Use Playwright to intercept the raw MP4 video stream from Douyin directly,
-    bypassing yt-dlp which gets blocked by WAF signatures.
+    Download Douyin video.
+    Strategy:
+      1. Get fresh cookies from Playwright (solves JS challenge)
+      2. Try yt-dlp with those cookies (fastest + handles HLS/DASH natively)
+      3. Fall back to Playwright network interception + FFmpeg download
     """
     from playwright.async_api import async_playwright
-    import httpx
+    import tempfile
 
-    logger.info(f"[Job {job_id}] 🌐 Launching Playwright to intercept Douyin stream...")
+    logger.info(f"[Job {job_id}] 🌐 Launching Playwright (cookie export + stream intercept)...")
 
-    video_url = None
+    mp4_candidates: list[tuple[int, int, str]] = []  # (priority, content_length, url)
+    hls_candidates: list[tuple[int, str]] = []
     title = f"douyin_{job_id}"
+    page_url = url
+    fresh_cookie_file: str | None = None
+    intercepted_url: str | None = None
+    use_hls = False
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -208,48 +281,72 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path, setti
             ],
         )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent=ua,
             viewport={"width": 1920, "height": 1080},
             locale="zh-CN",
         )
 
-        # Inject stored cookies if available
         if settings.douyin_cookies:
-            stored_cookies_netscape = settings.douyin_cookies.replace("\\n", "\n")
-            pw_cookies = _parse_cookies_to_playwright(stored_cookies_netscape)
+            stored = settings.douyin_cookies.replace("\\n", "\n")
+            pw_cookies = _parse_cookies_to_playwright(stored)
             if pw_cookies:
                 await context.add_cookies(pw_cookies)
                 logger.info(f"[Job {job_id}] Injected {len(pw_cookies)} stored cookies into browser")
 
         page = await context.new_page()
-
-        # Stealth
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => false });")
 
         async def handle_response(response):
-            nonlocal video_url
-            if not video_url and response.status in (200, 206):
-                req_type = response.request.resource_type
-                ct = response.headers.get("content-type", "")
-                url_lower = response.url.lower()
-                
-                # Check if it's a media request, OR looks like a video chunk based on content-type/url
-                if req_type == "media" or "video" in ct or "audio" in ct or "application/octet-stream" in ct:
-                    if "douyinvod.com" in url_lower or "video" in url_lower or req_type == "media":
-                        video_url = response.url
-                        logger.info(f"[Job {job_id}] 🎯 Intercepted video URL ({req_type}): {video_url[:100]}...")
+            if response.status not in (200, 206):
+                return
+            req_type = response.request.resource_type
+            ct = response.headers.get("content-type", "")
+            resp_url = response.url
+            rl = resp_url.lower()
+
+            is_cdn = (
+                "douyinvod.com" in rl or "bytecdn.cn" in rl
+                or "bytedance.com" in rl or "tiktokcdn.com" in rl
+            )
+            # Skip individual HLS/DASH segments — we want the manifest
+            if ".ts" in rl or ".m4s" in rl:
+                return
+
+            is_hls = (
+                ".m3u8" in rl
+                or "application/x-mpegurl" in ct.lower()
+                or "application/vnd.apple.mpegurl" in ct.lower()
+            )
+            if is_hls:
+                hls_candidates.append((0 if is_cdn else 1, resp_url))
+                logger.info(f"[Job {job_id}] 📡 HLS manifest: {resp_url[:120]}...")
+                return
+
+            if req_type == "media" or "video/mp4" in ct or "video/webm" in ct:
+                try:
+                    content_length = int(response.headers.get("content-length", "0"))
+                except Exception:
+                    content_length = 0
+                mp4_candidates.append((0 if is_cdn else 1, content_length, resp_url))
+                logger.info(f"[Job {job_id}] 📡 MP4 candidate ({content_length//1024}KB): {resp_url[:120]}...")
 
         page.on("response", handle_response)
 
         try:
-            logger.info(f"[Job {job_id}] Navigating to {url}...")
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(5000)
 
-            # Wait for JS challenge and video load
-            logger.info(f"[Job {job_id}] Waiting 10s for page to render and requests to fire...")
-            await page.wait_for_timeout(10000)
+            # Trigger video autoplay (headless browsers block it by default)
+            try:
+                await page.evaluate("""() => {
+                    const v = document.querySelector('video');
+                    if (v) { v.muted = true; v.play().catch(() => {}); }
+                }""")
+            except Exception:
+                pass
 
-            # Attempt to get the page title
+            await page.wait_for_timeout(8000)
+
             try:
                 page_title = await page.title()
                 if page_title and "douyin" not in page_title.lower() and "captcha" not in page_title.lower():
@@ -260,53 +357,98 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path, setti
         except Exception as e:
             logger.warning(f"[Job {job_id}] Page navigation warning: {e}")
 
-        # Fallback if interception failed: try DOM extract
-        if not video_url:
-            logger.warning(f"[Job {job_id}] No video request intercepted, extracting from DOM...")
+        # Export fresh cookies → yt-dlp can use them
+        try:
+            browser_cookies = await context.cookies()
+            lines = ["# Netscape HTTP Cookie File"]
+            for c in browser_cookies:
+                domain = c.get("domain", ".douyin.com")
+                subdomains = "TRUE" if domain.startswith(".") else "FALSE"
+                path = c.get("path", "/")
+                secure = "TRUE" if c.get("secure") else "FALSE"
+                expiry = max(0, int(c.get("expires", 0)))
+                name, value = c.get("name", ""), c.get("value", "")
+                if name:
+                    lines.append(f"{domain}\t{subdomains}\t{path}\t{secure}\t{expiry}\t{name}\t{value}")
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+            tmp.write("\n".join(lines) + "\n")
+            tmp.close()
+            fresh_cookie_file = tmp.name
+            logger.info(f"[Job {job_id}] 🍪 Exported {len(browser_cookies)} fresh cookies for yt-dlp")
+        except Exception as e:
+            logger.warning(f"[Job {job_id}] Cookie export failed: {e}")
+
+        # Pick best intercepted URL as fallback
+        # Sort: CDN priority first, then largest content-length (filters out small ad clips)
+        if mp4_candidates:
+            mp4_candidates.sort(key=lambda x: (x[0], -x[1]))
+            best = mp4_candidates[0]
+            intercepted_url = best[2]
+            logger.info(f"[Job {job_id}] 🎯 Intercepted MP4 ({len(mp4_candidates)} candidates, best={best[1]//1024}KB): {intercepted_url[:120]}...")
+        elif hls_candidates:
+            hls_candidates.sort(key=lambda x: x[0])
+            intercepted_url = hls_candidates[0][1]
+            use_hls = True
+            logger.info(f"[Job {job_id}] 🎯 Intercepted HLS ({len(hls_candidates)} candidates): {intercepted_url[:120]}...")
+
+        if not intercepted_url:
             try:
-                video_url = await page.evaluate('''() => {
-                    const vid = document.querySelector('video');
-                    if (vid) {
-                        return vid.querySelector('source') ? vid.querySelector('source').src : vid.src;
-                    }
+                intercepted_url = await page.evaluate("""() => {
+                    const v = document.querySelector('video');
+                    if (v) return v.querySelector('source') ? v.querySelector('source').src : v.src;
                     return null;
-                }''')
-            except Exception as e:
-                logger.warning(f"[Job {job_id}] DOM extraction failed: {e}")
+                }""")
+                if intercepted_url:
+                    logger.info(f"[Job {job_id}] DOM fallback URL: {intercepted_url[:120]}...")
+            except Exception:
+                pass
 
         await browser.close()
 
-    if not video_url:
-        raise RuntimeError("Failed to intercept Douyin video URL. Douyin might have blocked the request or the video is private.")
+    # ── Phase 2: yt-dlp with fresh cookies (primary) ─────────────────────
+    if fresh_cookie_file:
+        result = await _try_ytdlp_douyin(url, job_id, output_dir, fresh_cookie_file)
+        try:
+            os.unlink(fresh_cookie_file)
+        except Exception:
+            pass
+        if result:
+            return result
+        logger.warning(f"[Job {job_id}] yt-dlp failed, falling back to intercepted URL + FFmpeg...")
 
-    if video_url.startswith("//"):
-        video_url = "https:" + video_url
+    # ── Phase 3: FFmpeg download from intercepted URL (fallback) ──────────
+    if not intercepted_url:
+        raise RuntimeError("Douyin download failed: yt-dlp gave up and no video URL was intercepted by Playwright.")
 
-    # Download the intercepted video URL
-    import re
+    if intercepted_url.startswith("//"):
+        intercepted_url = "https:" + intercepted_url
+
     safe_title = re.sub(r'[\\/*?:"<>|]', "_", title[:80])
     output_path = output_dir / f"{safe_title}.mp4"
-    logger.info(f"[Job {job_id}] 📥 Downloading raw video stream to {output_path}...")
+    label = "HLS stream" if use_hls else "MP4"
+    logger.info(f"[Job {job_id}] 📥 FFmpeg downloading {label} → {output_path}...")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.douyin.com/",
-    }
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-user_agent", ua,
+        "-headers", f"Referer: {page_url}\r\n",
+        "-i", intercepted_url,
+        "-c", "copy",
+        str(output_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *ffmpeg_cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, ffmpeg_stderr = await proc.communicate()
 
-    try:
-        import httpx
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            async with client.stream("GET", video_url, headers=headers) as r:
-                r.raise_for_status()
-                with open(output_path, "wb") as f:
-                    async for chunk in r.aiter_bytes(chunk_size=8192):
-                        f.write(chunk)
-    except Exception as e:
-        raise RuntimeError(f"Failed to download intercepted video stream: {e}")
+    if proc.returncode != 0:
+        err = ffmpeg_stderr.decode("utf-8", errors="replace")[-400:]
+        raise RuntimeError(f"FFmpeg fallback also failed: {err}")
 
     logger.info(f"[Job {job_id}] ✅ Douyin direct download complete: {output_path}")
 
-    # Generate an info.json for consistency
     info_dict = {"title": title, "duration": None, "thumbnail": None}
     with open(output_dir / f"{safe_title}.info.json", "w", encoding="utf-8") as f:
         json.dump(info_dict, f, ensure_ascii=False)
@@ -375,9 +517,23 @@ async def download_video(url: str, job_id: int) -> dict:
     if platform == Platform.TIKTOK:
         cmd.extend(["--extractor-args", "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"])
 
+    # YouTube: add cookies to avoid 429 rate limiting
+    yt_cookie_file = None
+    if platform == Platform.YOUTUBE:
+        cmd.extend(["--extractor-args", "youtube:player_client=web,default"])
+        if settings.youtube_cookies:
+            # Write cookie string to temp file
+            yt_cookie_file = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.txt', prefix='yt_cookies_', delete=False, encoding='utf-8'
+            )
+            yt_cookie_file.write(settings.youtube_cookies)
+            yt_cookie_file.close()
+            cmd.extend(["--cookies", yt_cookie_file.name])
+            logger.info(f"[Job {job_id}] Using YouTube cookies from settings")
+
     cmd.append(url)
 
-    logger.info(f"[Job {job_id}] Running: {' '.join(cmd)}")
+    logger.info(f"[Job {job_id}] Running: {' '.join(cmd[:8])}...")
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -385,6 +541,13 @@ async def download_video(url: str, job_id: int) -> dict:
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await process.communicate()
+
+    # Cleanup temp cookie file
+    if yt_cookie_file:
+        try:
+            os.unlink(yt_cookie_file.name)
+        except Exception:
+            pass
 
     stdout_str = stdout.decode("utf-8", errors="replace")
     stderr_str = stderr.decode("utf-8", errors="replace")

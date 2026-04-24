@@ -34,7 +34,7 @@ async def publish_to_x(
     if x_cookies_json:
         cookies_str = x_cookies_json
     else:
-        cookies_file = Path("/opt/content-bridge/data/x_cookies.json")
+        cookies_file = Path(os.getenv("X_COOKIES_PATH", "/opt/content-bridge/data/x_cookies.json"))
         if not cookies_file.exists():
             raise ValueError("Twitter cookies JSON not found in settings or provided to job.")
         cookies_str = cookies_file.read_text(encoding="utf-8")

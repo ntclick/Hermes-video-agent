@@ -129,7 +129,7 @@ export default function Dashboard() {
 
   // WebSocket for live updates on selected job
   useEffect(() => {
-    if (selected && !['completed', 'failed'].includes(selected.status)) {
+    if (selected && !['completed', 'failed', 'cancelled'].includes(selected.status)) {
       const ws = connectWebSocket(selected.id, (d) => {
         if (d.type === 'job_update') {
           setSelected(d.job);
@@ -139,7 +139,7 @@ export default function Dashboard() {
       wsRef.current = ws;
       return () => ws.close();
     }
-  }, [selected?.id]);
+  }, [selected?.id, selected?.status]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -175,10 +175,12 @@ export default function Dashboard() {
   };
 
   const handlePublishJob = async (id: number) => {
-    try { 
-      await publishJob(id); 
+    try {
+      await publishJob(id, xAccountId || undefined);
+      // Optimistically flip to 'publishing' so WS reconnects and logs stream live
+      setSelected(prev => prev && prev.id === id ? { ...prev, status: 'publishing' } : prev);
+      setJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'publishing' } : j));
       setTab('logs');
-      await fetchAll();
     } catch (e: any) { setFormError(e.message); }
   };
 
@@ -461,38 +463,7 @@ export default function Dashboard() {
                       <div className="error-box">❌ {selected.error_message}</div>
                     )}
 
-                    {/* Detailed Report Card */}
-                    {selected.status === 'completed' && (
-                      <div className="agent-card" style={{ background: 'var(--surface-1)' }}>
-                        <div className="agent-card-title">📋 Hackathon Detailed Report</div>
-                        <div style={{ fontSize: 13, color: 'var(--text-1)', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          <div><strong>Selected Language:</strong> {selected.target_language.toUpperCase()}</div>
-                          <div><strong>Original Duration:</strong> {Math.round(selected.duration || 0)}s</div>
-                          <div><strong>Output Video:</strong> <a href={`${API_BASE}/api/videos/${selected.id}/output.mp4`} download style={{ color: 'var(--accent)' }}>Download Subtitled Video</a></div>
-                          {selected.tweet_id ? (
-                            <div><strong>X (Twitter) Post:</strong> <a href={`https://x.com/i/status/${selected.tweet_id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)' }}>https://x.com/i/status/{selected.tweet_id}</a></div>
-                          ) : (
-                            <button 
-                              className="btn btn-primary" 
-                              style={{ padding: '6px 12px', alignSelf: 'flex-start', marginTop: 4 }}
-                              onClick={() => handlePublishJob(selected.id)}
-                            >
-                              🚀 Publish to X
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* AI Summary — show whenever available */}
-                    {selected.summary && (
-                      <div className="summary-box">
-                        <div className="box-label">🧠 AI Summary</div>
-                        <div className="summary-text">{selected.summary}</div>
-                      </div>
-                    )}
-
-                    {/* Keyframes — show whenever frames exist (even during pipeline or on failure) */}
+                    {/* Keyframes */}
                     {selected.frames_path && (
                       <div className="summary-box">
                         <div className="box-label" style={{ marginBottom: 6 }}>🎞️ Keyframes</div>
@@ -514,33 +485,93 @@ export default function Dashboard() {
                       </div>
                     )}
 
-                    {/* Tweet Text — Editable */}
-                    {(selected.tweet_text || selected.status === 'completed') && (
-                      <div className="tweet-editor-box">
-                        <div className="box-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span>🐦 Tweet Text</span>
-                          {!editingTweet && selected.tweet_text && (
-                            <button className="btn-ghost btn-xs" onClick={handleEditTweet}>✏️ Edit</button>
-                          )}
-                        </div>
-                        {editingTweet ? (
-                          <div>
-                            <textarea
-                              className="tweet-textarea"
-                              value={tweetDraft}
-                              onChange={e => setTweetDraft(e.target.value)}
-                              rows={4}
-                            />
-                            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                              <button className="btn-save btn-sm" onClick={handleSaveTweet} disabled={savingTweet}>
-                                {savingTweet ? '⏳ Saving...' : '💾 Save'}
-                              </button>
-                              <button className="btn-ghost btn-sm" onClick={() => setEditingTweet(false)}>Cancel</button>
-                            </div>
+                    {/* AI Summary */}
+                    {selected.summary && (
+                      <div className="summary-box">
+                        <div className="box-label">🧠 AI Summary</div>
+                        <div className="summary-text">{selected.summary}</div>
+                      </div>
+                    )}
+
+                    {/* Publish Section — all completed jobs */}
+                    {selected.status === 'completed' && (
+                      <div className="summary-box">
+                        {selected.tweet_id ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <div className="box-label" style={{ color: 'var(--green)' }}>✅ Posted to X</div>
+                            <a href={`https://x.com/i/status/${selected.tweet_id}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontSize: 13 }}>
+                              View tweet →
+                            </a>
+                            {selected.output_path && (
+                              <a href={`${API_BASE}/api/videos/${selected.id}/output.mp4`} download style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                                ⬇️ Download video
+                              </a>
+                            )}
                           </div>
                         ) : (
-                          <div className="tweet-text-display">
-                            {selected.tweet_text || <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>No tweet text yet</span>}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            <div className="box-label">🐦 Post to X</div>
+
+                            {/* Tweet caption editor */}
+                            <div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                                <span style={{ fontSize: 11, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Caption</span>
+                                {!editingTweet && selected.tweet_text && (
+                                  <button className="btn-ghost btn-xs" onClick={handleEditTweet}>✏️ Edit</button>
+                                )}
+                              </div>
+                              {editingTweet ? (
+                                <div>
+                                  <textarea
+                                    className="tweet-textarea"
+                                    value={tweetDraft}
+                                    onChange={e => setTweetDraft(e.target.value)}
+                                    rows={4}
+                                  />
+                                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                    <button className="btn-save btn-sm" onClick={handleSaveTweet} disabled={savingTweet}>
+                                      {savingTweet ? '⏳ Saving...' : '💾 Save'}
+                                    </button>
+                                    <button className="btn-ghost btn-sm" onClick={() => setEditingTweet(false)}>Cancel</button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="tweet-text-display">
+                                  {selected.tweet_text || <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>Auto-generated on post</span>}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Account selector + Post button */}
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              {xAccounts.length > 0 ? (
+                                <select
+                                  value={xAccountId ?? ''}
+                                  onChange={e => setXAccountId(e.target.value ? Number(e.target.value) : '')}
+                                  style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text-1)', fontSize: 13, cursor: 'pointer', flex: 1, minWidth: 0 }}
+                                >
+                                  <option value="">— Select account —</option>
+                                  {xAccounts.map(a => (
+                                    <option key={a.id} value={a.id}>🐦 @{a.username}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span style={{ fontSize: 12, color: 'var(--text-3)', flex: 1 }}>No accounts — add one in Settings</span>
+                              )}
+                              <button
+                                className="btn btn-primary"
+                                style={{ padding: '6px 14px', whiteSpace: 'nowrap' }}
+                                onClick={() => handlePublishJob(selected.id)}
+                              >
+                                🚀 Post to X
+                              </button>
+                            </div>
+
+                            {selected.output_path && (
+                              <a href={`${API_BASE}/api/videos/${selected.id}/output.mp4`} download style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                                ⬇️ Download video
+                              </a>
+                            )}
                           </div>
                         )}
                       </div>
@@ -558,60 +589,32 @@ export default function Dashboard() {
                         <button className="btn-danger" onClick={() => handleCancel(selected.id)}>⏹ Cancel</button>
                       )}
                       {selected.tweet_id && (
-                        <a
-                          href={`https://x.com/i/status/${selected.tweet_id}`}
-                          target="_blank" rel="noopener noreferrer"
-                          className="btn-ghost"
-                        >
+                        <a href={`https://x.com/i/status/${selected.tweet_id}`} target="_blank" rel="noopener noreferrer" className="btn-ghost">
                           🐦 View on X
                         </a>
                       )}
-                      {/* Generate Cover — only when no cover exists yet */}
                       {selected.status === 'completed' && selected.summary && !selected.cover_path && (
-                        <button
-                          className="btn-accent2"
-                          onClick={handleGenerateCover}
-                          disabled={coverBusy !== null}
-                        >
+                        <button className="btn-accent2" onClick={handleGenerateCover} disabled={coverBusy !== null}>
                           {coverBusy === 'generate' ? '⏳ Generating...' : '🎬 Generate AI Cover'}
                         </button>
                       )}
-                      {/* Regenerate Cover — when scenes already exist */}
                       {selected.ai_scenes_path && (
-                        <button
-                          className="btn-ghost"
-                          onClick={handleRegenerateCover}
-                          disabled={coverBusy !== null}
-                        >
+                        <button className="btn-ghost" onClick={handleRegenerateCover} disabled={coverBusy !== null}>
                           {coverBusy === 'regen' ? '⏳ Composing...' : '🔄 Re-compose Cover'}
                         </button>
                       )}
-                      {/* Rewrite Script + Regenerate */}
                       {selected.status === 'completed' && selected.summary && (
-                        <button
-                          className="btn-accent2"
-                          onClick={handleRewriteScript}
-                          disabled={coverBusy !== null}
-                        >
+                        <button className="btn-accent2" onClick={handleRewriteScript} disabled={coverBusy !== null}>
                           {coverBusy === 'rewrite' ? '⏳ Rewriting...' : '📜 Rewrite Cover'}
                         </button>
                       )}
-                      {/* Write Custom Video Script */}
                       {selected.status === 'completed' && selected.transcript && (
-                        <button
-                          className="btn-ghost"
-                          style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }}
-                          onClick={handleWriteScript}
-                          disabled={coverBusy !== null}
-                        >
+                        <button className="btn-ghost" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleWriteScript} disabled={coverBusy !== null}>
                           {coverBusy === 'rewrite' ? '⏳ Writing...' : '✍️ Write Script'}
                         </button>
                       )}
-                      {/* View Video Button fallback */}
                       {selected.status === 'completed' && (
-                        <button className="btn-ghost" onClick={() => setTab('video')}>
-                          ▶️ Watch Video
-                        </button>
+                        <button className="btn-ghost" onClick={() => setTab('video')}>▶️ Watch Video</button>
                       )}
                     </div>
 

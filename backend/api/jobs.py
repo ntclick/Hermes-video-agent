@@ -103,7 +103,8 @@ async def create_job(
     if body.target_language.startswith("script_") or body.target_language == "script":
         background_tasks.add_task(run_script_task, job.id)
     else:
-        background_tasks.add_task(run_pipeline, job.id, body.auto_publish)
+        effective_auto_publish = body.auto_publish and body.x_account_id is not None
+        background_tasks.add_task(run_pipeline, job.id, effective_auto_publish)
 
     return JobResponse(**job.to_dict())
 
@@ -315,10 +316,15 @@ async def update_job_fields(
     return JobResponse(**job.to_dict())
 
 
+class PublishRequest(BaseModel):
+    x_account_id: int | None = None
+
+
 # ── Manual Publish to X ──────────────────────────────────────
 @router.post("/{job_id}/publish")
 async def publish_job_to_x(
     job_id: int,
+    body: PublishRequest = PublishRequest(),
     db: AsyncSession = Depends(get_db),
 ):
     """Manually publish a completed job to X/Twitter."""
@@ -329,16 +335,22 @@ async def publish_job_to_x(
         raise HTTPException(status_code=400, detail="No rendered video. Complete pipeline first.")
 
     from backend.models import XAccount
-    x_account = await db.get(XAccount, job.x_account_id) if job.x_account_id else None
-    if not x_account or not x_account.cookies_json:
-        raise HTTPException(status_code=400, detail="No X account assigned or cookies missing.")
+    from sqlalchemy import select as _select
 
-    import asyncio
-    asyncio.create_task(_run_publish(job_id))
+    # Use the explicitly selected account, fall back to job's assigned account, then first in DB
+    override_id = body.x_account_id or job.x_account_id
+    x_account = await db.get(XAccount, override_id) if override_id else None
+    if not x_account or not x_account.cookies_json:
+        first = (await db.execute(_select(XAccount).limit(1))).scalars().first()
+        x_account = first if first and first.cookies_json else None
+    if not x_account or not x_account.cookies_json:
+        raise HTTPException(status_code=400, detail="No X account with cookies found. Add one in Settings.")
+
+    asyncio.create_task(_run_publish(job_id, x_account.id))
     return {"message": "Publishing to X started", "job_id": job_id}
 
 
-async def _run_publish(job_id: int):
+async def _run_publish(job_id: int, x_account_id: int):
     """Background task: generate tweet text from summary + publish to X."""
     from backend.database import async_session_factory
     from backend.services.publisher import publish_to_x
@@ -384,7 +396,7 @@ async def _run_publish(job_id: int):
                 job.append_log(f'📝 Using existing tweet: "{tweet_text[:60]}..."')
 
             # Publish via Playwright
-            x_account = await session.get(XAccount, job.x_account_id)
+            x_account = await session.get(XAccount, x_account_id)
             x_cookies = x_account.cookies_json if x_account else None
             label = f"@{x_account.username}" if x_account and x_account.username else "default"
 

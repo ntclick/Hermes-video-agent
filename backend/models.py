@@ -109,6 +109,7 @@ class Job(Base):
             "tweet_text": self.tweet_text,
             "summary": self.summary,
             "frames_path": self.frames_path,
+            "output_path": self.output_path,
             "x_account_id": self.x_account_id,
             "cover_path": self.cover_path,
             "ai_scenes_path": self.ai_scenes_path,
