@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import {
   Job, AppSettings,
@@ -242,18 +242,8 @@ export default function Extractor() {
                        </div>
                     )}
 
-                    {(() => {
-                      let parsedScript = null;
-                      if (selected.script_json) {
-                        try {
-                          parsedScript = JSON.parse(selected.script_json);
-                        } catch (e) {
-                          console.error("Failed to parse script_json", e);
-                        }
-                      }
-
-                      return selected.status === 'completed' && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                    {selected.status === 'completed' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
                         
                         {/* Downloaded Video Player */}
                         <div className="agent-card" style={{ background: 'var(--surface-1)', padding: 0, overflow: 'hidden' }}>
@@ -298,14 +288,17 @@ export default function Extractor() {
                         )}
 
                         {/* Rewritten Script */}
-                        {parsedScript && (
+                        {selected.script_json && (() => {
+                          try {
+                            const scenes = JSON.parse(selected.script_json);
+                            return (
                           <div className="agent-card" style={{ background: 'var(--surface-1)' }}>
                             <div className="agent-card-title" style={{ color: 'var(--accent)', display: 'flex', justifyContent: 'space-between' }}>
                               <span>✨ Rewritten AI Script</span>
                               <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{selected.target_language.replace('script_', '').toUpperCase()}</span>
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
-                              {parsedScript.map((scene: any, i: number) => (
+                              {scenes.map((scene: any, i: number) => (
                                 <div key={i} style={{ padding: 16, background: 'var(--bg-base)', borderRadius: 8, border: '1px solid var(--border)', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
                                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                                     <div style={{ fontSize: 12, color: 'var(--text-3)', fontWeight: 600, letterSpacing: 1 }}>SCENE {scene.scene_number || i + 1}</div>
@@ -321,7 +314,9 @@ export default function Extractor() {
                               ))}
                             </div>
                           </div>
-                        )}
+                            );
+                          } catch { return null; }
+                        })()}
 
                         {selected.transcript && (
                           <div className="agent-card" style={{ background: 'var(--bg-base)' }}>
@@ -332,7 +327,7 @@ export default function Extractor() {
                           </div>
                         )}
                       </div>
-                    })()}
+                    )}
                   </>
                 )}
               </div>
