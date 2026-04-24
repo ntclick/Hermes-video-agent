@@ -62,7 +62,7 @@ async def _get_fresh_douyin_cookies_via_playwright(url: str, stored_cookies_nets
 
         # Inject stored cookies if available
         if stored_cookies_netscape:
-            pw_cookies = _netscape_to_playwright(stored_cookies_netscape)
+            pw_cookies = _parse_cookies_to_playwright(stored_cookies_netscape)
             if pw_cookies:
                 await context.add_cookies(pw_cookies)
                 logger.info(f"[Job {job_id}] Injected {len(pw_cookies)} stored cookies into browser")
@@ -122,10 +122,42 @@ async def _get_fresh_douyin_cookies_via_playwright(url: str, stored_cookies_nets
     return cookie_file_path
 
 
-def _netscape_to_playwright(netscape_text: str) -> list[dict]:
-    """Convert Netscape cookie text to Playwright cookie format."""
+def _parse_cookies_to_playwright(cookie_text: str) -> list[dict]:
+    """Convert Netscape cookie text or JSON cookie array to Playwright cookie format."""
+    cookie_text = cookie_text.strip()
+    
+    # Try parsing as JSON first
+    if cookie_text.startswith("[") and cookie_text.endswith("]"):
+        try:
+            json_cookies = json.loads(cookie_text)
+            pw_cookies = []
+            for c in json_cookies:
+                pw_c = {
+                    "name": c.get("name", ""),
+                    "value": c.get("value", ""),
+                    "domain": c.get("domain", ""),
+                    "path": c.get("path", "/"),
+                }
+                if "secure" in c:
+                    pw_c["secure"] = bool(c["secure"])
+                if "httpOnly" in c:
+                    pw_c["httpOnly"] = bool(c["httpOnly"])
+                if "expirationDate" in c:
+                    pw_c["expires"] = int(c["expirationDate"])
+                elif "expires" in c:
+                    try:
+                        pw_c["expires"] = int(c["expires"])
+                    except Exception:
+                        pass
+                if pw_c["name"] and pw_c["domain"]:
+                    pw_cookies.append(pw_c)
+            return pw_cookies
+        except Exception as e:
+            logger.warning(f"Failed to parse JSON cookies: {e}")
+
+    # Fallback to Netscape parsing
     cookies = []
-    for line in netscape_text.splitlines():
+    for line in cookie_text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -184,7 +216,7 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path, setti
         # Inject stored cookies if available
         if settings.douyin_cookies:
             stored_cookies_netscape = settings.douyin_cookies.replace("\\n", "\n")
-            pw_cookies = _netscape_to_playwright(stored_cookies_netscape)
+            pw_cookies = _parse_cookies_to_playwright(stored_cookies_netscape)
             if pw_cookies:
                 await context.add_cookies(pw_cookies)
                 logger.info(f"[Job {job_id}] Injected {len(pw_cookies)} stored cookies into browser")
@@ -196,12 +228,16 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path, setti
 
         async def handle_response(response):
             nonlocal video_url
-            if "video" in response.url or "v26-web" in response.url or "v3-web" in response.url or "v5-dy" in response.url:
+            if not video_url and response.status in (200, 206):
+                req_type = response.request.resource_type
                 ct = response.headers.get("content-type", "")
-                if "video" in ct or "application/octet-stream" in ct or "audio" in ct:
-                    if not video_url and response.status == 200:
+                url_lower = response.url.lower()
+                
+                # Check if it's a media request, OR looks like a video chunk based on content-type/url
+                if req_type == "media" or "video" in ct or "audio" in ct or "application/octet-stream" in ct:
+                    if "douyinvod.com" in url_lower or "video" in url_lower or req_type == "media":
                         video_url = response.url
-                        logger.info(f"[Job {job_id}] 🎯 Intercepted video URL: {video_url[:100]}...")
+                        logger.info(f"[Job {job_id}] 🎯 Intercepted video URL ({req_type}): {video_url[:100]}...")
 
         page.on("response", handle_response)
 
