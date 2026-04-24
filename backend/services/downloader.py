@@ -152,7 +152,7 @@ def _netscape_to_playwright(netscape_text: str) -> list[dict]:
 
 # ── Main Download Function ────────────────────────────────────
 
-async def _download_douyin_direct(url: str, job_id: int, output_dir: Path) -> dict:
+async def _download_douyin_direct(url: str, job_id: int, output_dir: Path, settings) -> dict:
     """
     Use Playwright to intercept the raw MP4 video stream from Douyin directly,
     bypassing yt-dlp which gets blocked by WAF signatures.
@@ -161,7 +161,6 @@ async def _download_douyin_direct(url: str, job_id: int, output_dir: Path) -> di
     import httpx
 
     logger.info(f"[Job {job_id}] 🌐 Launching Playwright to intercept Douyin stream...")
-    settings = get_settings()
 
     video_url = None
     title = f"douyin_{job_id}"
@@ -291,7 +290,18 @@ async def download_video(url: str, job_id: int) -> dict:
     """
     Download video using yt-dlp (YouTube/TikTok) or Playwright direct intercept (Douyin).
     """
-    settings = get_settings()
+    from backend.models import Job
+    from backend.database import get_session_factory
+    from backend.config import get_job_settings
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+        if job and job.user_keys_json:
+            settings = get_job_settings(job.user_keys_json)
+        else:
+            settings = get_settings()
+
     output_dir = settings.downloads_dir / str(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(output_dir / "%(title).80s.%(ext)s")
@@ -310,7 +320,7 @@ async def download_video(url: str, job_id: int) -> dict:
 
     # For Douyin, bypass yt-dlp entirely due to aggressive anti-bot blocking
     if platform == Platform.DOUYIN:
-        return await _download_douyin_direct(url, job_id, output_dir)
+        return await _download_douyin_direct(url, job_id, output_dir, settings)
 
     # Build yt-dlp command for other platforms
     cmd = [
