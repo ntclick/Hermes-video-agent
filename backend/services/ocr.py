@@ -56,7 +56,7 @@ def _get_reader():
 
 
 # ── Frame extraction ────────────────────────────────────────────────
-async def _extract_frames(video_path: str, output_dir: Path, interval: int = 2) -> list[Path]:
+async def _extract_frames(video_path: str, output_dir: Path, interval: int = 1) -> list[Path]:
     """Extract frames from video at every `interval` seconds."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -94,12 +94,24 @@ def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
 
     # raw_detections: list of (frame_time, text, x, y, w, h)
     raw = []
+    # Get frame height from first frame to determine subtitle zone
+    frame_h = 0
+    if frames:
+        from PIL import Image
+        with Image.open(str(frames[0])) as img:
+            frame_h = img.height
+    subtitle_zone_y = int(frame_h * 0.75) if frame_h > 0 else 9999  # bottom 25% = subtitle area
+
     for i, frame_path in enumerate(frames):
         t = i * interval  # time in seconds
         results = reader.readtext(str(frame_path), detail=1)
 
         for bbox, text, confidence in results:
-            if confidence < 0.35 or not text.strip():
+            if confidence < 0.50 or not text.strip():
+                continue
+            # Skip very short text (likely noise)
+            text_clean = text.strip()
+            if len(text_clean) < 2:
                 continue
 
             tl, tr, br, bl = bbox
@@ -112,8 +124,12 @@ def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
             if w < 25 or h < 12 or w > 1600:
                 continue
 
+            # Skip text in the bottom 25% — that's our subtitle area, don't blur it
+            if y > subtitle_zone_y:
+                continue
+
             raw.append({
-                "text": text.strip(), "x": x, "y": y, "w": w, "h": h, "t": t
+                "text": text_clean, "x": x, "y": y, "w": w, "h": h, "t": t
             })
 
     if not raw:
@@ -121,11 +137,11 @@ def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
 
     # ── Group identical text at similar positions across frames ──
     # Key: (text, quantized_x, quantized_y) → merge into time ranges
+    # Use tighter 20px grid to avoid merging different text blocks
     groups = defaultdict(list)
     for det in raw:
-        # Quantize position to 30px grid to merge slightly shifted text
-        qx = det["x"] // 30
-        qy = det["y"] // 30
+        qx = det["x"] // 20
+        qy = det["y"] // 20
         key = (det["text"], qx, qy)
         groups[key].append(det)
 
@@ -141,15 +157,17 @@ def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
         merged.append({
             "text": dets[0]["text"],
             "x": avg_x, "y": avg_y, "w": max_w, "h": max_h,
-            "t_start": max(0, min(times) - 0.5),
-            "t_end": max(times) + interval + 0.5,
+            "t_start": max(0, min(times) - 0.3),
+            "t_end": max(times) + interval + 0.3,
         })
 
-    # Sort by time, limit to 40 regions max to prevent FFmpeg overload
+    # Sort by time, limit to 60 regions max to prevent FFmpeg overload
     merged.sort(key=lambda r: (r["t_start"], r["y"]))
-    if len(merged) > 40:
-        logger.warning(f"Too many OCR regions ({len(merged)}), keeping top 40")
-        merged = merged[:40]
+    if len(merged) > 60:
+        # Keep the most prominent ones (longer duration = more important)
+        merged.sort(key=lambda r: r["t_end"] - r["t_start"], reverse=True)
+        merged = merged[:60]
+        merged.sort(key=lambda r: (r["t_start"], r["y"]))
 
     logger.info(f"Grouped {len(raw)} raw detections into {len(merged)} text regions")
     return merged
@@ -166,7 +184,7 @@ async def _translate_texts(texts: list[str], target_language: str, job_id: int) 
         return {}
 
     translation_map = {}
-    chunk_size = 40
+    chunk_size = 30  # smaller chunks for better accuracy
 
     for i in range(0, len(unique), chunk_size):
         chunk = unique[i:i + chunk_size]
@@ -174,9 +192,14 @@ async def _translate_texts(texts: list[str], target_language: str, job_id: int) 
         _lang_names = {"vi": "Vietnamese", "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean"}
         lang_name = _lang_names.get(target_language[:2], target_language)
         prompt = (
-            f"Translate the following short text snippets from Chinese to {lang_name}. "
-            f"These are hardcoded text overlays in a cooking/lifestyle video. "
-            f"Return ONLY a valid JSON object mapping original text to translated text.\n\n"
+            f"Translate ALL of the following text snippets to {lang_name}. "
+            f"These are hardcoded text overlays burned into a video — they include ingredient lists, "
+            f"measurements (ml, g, etc.), step instructions, timestamps, captions, and decorative text. "
+            f"IMPORTANT RULES:\n"
+            f"1. Translate EVERY item — do NOT skip any\n"
+            f"2. Keep numbers and units (200ml, 3g, etc.) as-is, only translate the words\n"
+            f"3. For very short text (1-2 chars), still translate or transliterate\n"
+            f"4. Return ONLY a JSON object: {{\"original\": \"translated\"}}\n\n"
             + json.dumps(chunk, ensure_ascii=False)
         )
 
@@ -187,7 +210,11 @@ async def _translate_texts(texts: list[str], target_language: str, job_id: int) 
             response = await client.chat.completions.create(
                 model="kimi-k2.6",
                 messages=[
-                    {"role": "system", "content": "You are a professional translator. Return only valid JSON: {\"original\": \"translated\"}."},
+                    {"role": "system", "content": (
+                        f"You are a professional Chinese-to-{lang_name} translator specialized in video content. "
+                        f"You MUST translate every single text snippet given to you. Never skip any item. "
+                        f"Return only valid JSON: {{\"original\": \"translated\"}}."
+                    )},
                     {"role": "user", "content": prompt}
                 ],
                 extra_body={"thinking": {"type": "disabled"}},
@@ -197,7 +224,12 @@ async def _translate_texts(texts: list[str], target_language: str, job_id: int) 
             content = response.choices[0].message.content
             translated = json.loads(content)
             translation_map.update(translated)
-            logger.info(f"[Job {job_id}] Translated OCR chunk: {len(translated)} items")
+            logger.info(f"[Job {job_id}] Translated OCR chunk: {len(translated)}/{len(chunk)} items")
+            
+            # Check for missing translations
+            missing = [t for t in chunk if t not in translated]
+            if missing:
+                logger.warning(f"[Job {job_id}] OCR: {len(missing)} texts not translated: {missing[:5]}")
         except Exception as e:
             logger.error(f"[Job {job_id}] OCR translation chunk failed: {e}")
             for t in chunk:
@@ -223,56 +255,30 @@ def _escape_ffmpeg_text(text: str) -> str:
 
 def _build_filters(regions: list[dict], translation_map: dict, target_language: str) -> list[str]:
     """
-    Generate FFmpeg filter strings for each text region:
-    1. delogo (blur original text area)
-    2. drawtext (overlay translated text)
+    Generate FFmpeg filter strings to BLUR (cover) all detected hardcoded text.
+    
+    Strategy: Only blur the original text — do NOT overlay translated text.
+    The burned-in subtitles at the bottom already provide the translation.
+    This avoids duplication, visual clutter, and misaligned text.
+    
+    Skips text in the bottom 20% of the frame (that's the subtitle area).
     """
-    font_path = _get_font_path(target_language)
     filters = []
 
-    import textwrap
-
     for region in regions:
-        original = region["text"]
-        translated = translation_map.get(original, original)
-        if translated == original and target_language[:2] != "zh":
-            # Skip if translation failed and we're not keeping Chinese
-            continue
-
         x, y, w, h = region["x"], region["y"], region["w"], region["h"]
         t_start, t_end = region["t_start"], region["t_end"]
         enable = f"between(t,{t_start:.1f},{t_end:.1f})"
 
-        # 1. Blur original text (delogo with padding)
-        x_pad = max(0, x - 4)
+        # Cover original text with a dark box (clean, reliable, no artifacts)
+        x_pad = max(0, x - 6)
         y_pad = max(0, y - 4)
-        w_pad = w + 8
+        w_pad = w + 12
         h_pad = h + 8
         filters.append(
-            f"delogo=x={x_pad}:y={y_pad}:w={w_pad}:h={h_pad}:enable='{enable}'"
+            f"drawbox=x={x_pad}:y={y_pad}:w={w_pad}:h={h_pad}:"
+            f"color=black@0.85:t=fill:enable='{enable}'"
         )
-
-        # 2. Draw translated text on top
-        # Estimate max characters per line based on font size and box width
-        font_size = max(14, min(int(h * 0.75), 36))
-        # average char width is about 0.6 * font_size
-        chars_per_line = max(15, int(w / (font_size * 0.6)))
-        
-        # Wrap the text
-        wrapped_lines = textwrap.wrap(translated, width=chars_per_line)
-        
-        # Draw each line separately, moving down by font_size * 1.2
-        for i, line in enumerate(wrapped_lines):
-            safe_text = _escape_ffmpeg_text(line)
-            line_y = y + int(i * font_size * 1.2)
-            filters.append(
-                f"drawtext=text='{safe_text}':"
-                f"fontfile='{font_path}':"
-                f"fontcolor=white:fontsize={font_size}:"
-                f"box=1:boxcolor=black@0.5:boxborderw=3:"
-                f"x={x}:y={line_y}:"
-                f"enable='{enable}'"
-            )
 
     return filters
 
@@ -289,17 +295,20 @@ async def process_video_ocr(
     1. Extract frames (every 2s)
     2. Detect text regions with EasyOCR
     3. Group identical text across frames
-    4. Translate unique texts via Kimi
-    5. Generate FFmpeg delogo + drawtext filters
+    4. Generate FFmpeg drawbox filters to blur/cover detected text
+
+    Note: No translation is done here — the burned-in subtitles handle translation.
+    OCR only removes the original hardcoded text to keep the video clean.
 
     Returns: list of FFmpeg filter strings
     """
-    logger.info(f"[Job {job_id}] Starting OCR Translation Pipeline")
+    logger.info(f"[Job {job_id}] Starting OCR Blur Pipeline")
 
-    # Step 1: Extract frames
+    # Step 1: Extract frames (every 1s for better coverage)
     temp_dir = Path(tempfile.mkdtemp(prefix=f"ocr_job_{job_id}_"))
+    interval = 1  # 1 second between frames
     try:
-        frames = await _extract_frames(video_path, temp_dir, interval=2)
+        frames = await _extract_frames(video_path, temp_dir, interval=interval)
 
         if progress_callback:
             await progress_callback(10.0, f"Extracted {len(frames)} frames for OCR")
@@ -310,36 +319,29 @@ async def process_video_ocr(
 
         # Step 2: OCR detection (CPU-heavy, run in thread)
         if progress_callback:
-            await progress_callback(15.0, "Running EasyOCR detection (this is slow)...")
+            await progress_callback(15.0, "Running EasyOCR detection...")
 
         regions = await asyncio.get_event_loop().run_in_executor(
-            None, _detect_text_regions, frames, 2
+            None, _detect_text_regions, frames, interval
         )
 
         if progress_callback:
-            await progress_callback(50.0, f"Detected {len(regions)} text regions")
+            await progress_callback(60.0, f"Detected {len(regions)} text regions")
 
         if not regions:
-            logger.info(f"[Job {job_id}] No text detected in video frames")
+            logger.info(f"[Job {job_id}] No hardcoded text detected in video frames")
             return []
 
-        # Step 3: Translate
+        # Step 3: Build blur filters (no translation needed — subtitles handle that)
         if progress_callback:
-            await progress_callback(55.0, f"Translating {len(set(r['text'] for r in regions))} unique texts...")
+            await progress_callback(80.0, "Generating blur filters...")
 
-        unique_texts = [r["text"] for r in regions]
-        translation_map = await _translate_texts(unique_texts, target_language, job_id)
+        filters = _build_filters(regions, {}, target_language)
 
-        if progress_callback:
-            await progress_callback(75.0, "Generating FFmpeg overlay filters...")
-
-        # Step 4: Build filters
-        filters = _build_filters(regions, translation_map, target_language)
-
-        logger.info(f"[Job {job_id}] OCR pipeline complete: {len(filters)} FFmpeg filters generated")
+        logger.info(f"[Job {job_id}] OCR blur pipeline complete: {len(filters)} filters generated")
 
         if progress_callback:
-            await progress_callback(100.0, f"OCR done: {len(filters)} filters ready")
+            await progress_callback(100.0, f"OCR done: {len(filters)} blur filters ready")
 
         return filters
 
