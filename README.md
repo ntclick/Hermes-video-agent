@@ -9,10 +9,11 @@
 - [Architecture Overview](#-architecture-overview)
 - [What is Hermes?](#-what-is-hermes)
 - [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
+- [Installation (Local)](#-installation)
 - [Configuration](#-configuration)
 - [Running the App](#-running-the-app)
 - [Usage Guide](#-usage-guide)
+- [Deploy to VPS (Production)](#-deploy-to-vps-production)
 - [Tech Stack](#-tech-stack)
 - [Troubleshooting](#-troubleshooting)
 
@@ -337,6 +338,216 @@ Douyin aggressively blocks automated access. Solutions:
 
 ### Windows: "NotImplementedError" on asyncio
 This is automatically handled by the app. If you still see it, make sure you're using Python 3.11+.
+
+---
+
+## 🚀 Deploy to VPS (Production)
+
+This section guides you through deploying the system on your own Linux VPS so it runs 24/7.
+
+### Minimum VPS Requirements
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| **CPU** | 2 cores | 4+ cores |
+| **RAM** | 4 GB | 8+ GB |
+| **Disk** | 20 GB free | 50+ GB |
+| **OS** | Ubuntu 20.04+ / Debian 11+ | Ubuntu 22.04 |
+
+> **Note:** EasyOCR (PyTorch) and FFmpeg are CPU-intensive. More cores = faster video processing. No GPU required.
+
+### Step 1: Prepare the VPS
+
+SSH into your server and install system dependencies:
+
+```bash
+ssh root@YOUR_VPS_IP
+
+# Update system
+apt update && apt upgrade -y
+
+# Install Python 3.12, Node.js 20, FFmpeg, and build tools
+apt install -y python3.12 python3.12-venv python3-pip ffmpeg git curl
+
+# Install Node.js 20 via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
+
+# Install PM2 (process manager — keeps app running after SSH disconnect)
+npm install -g pm2
+
+# Install Playwright system dependencies
+npx playwright install-deps chromium
+```
+
+### Step 2: Clone & Set Up the Project
+
+```bash
+# Clone the repo
+cd /opt
+git clone https://github.com/ntclick/hermes-video-agent.git content-bridge
+cd content-bridge
+
+# Python virtual environment
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+
+# Frontend
+cd frontend
+npm install
+npm run build   # Production build (required for PM2)
+cd ..
+```
+
+### Step 3: Configure Environment
+
+```bash
+cp .env.example .env
+nano .env   # Fill in your API keys (see Configuration section above)
+```
+
+Important `.env` values for VPS:
+```env
+KIMI_API_KEY=your_key_here
+HERMES_PROVIDER=kimi
+APP_HOST=0.0.0.0
+APP_PORT=8000
+DATA_DIR=/opt/content-bridge/data
+WHISPER_MODEL=base
+```
+
+### Step 4: Create PM2 Ecosystem File
+
+```bash
+cat > ecosystem.config.js << 'EOF'
+module.exports = {
+  apps: [
+    {
+      name: 'content-bridge-api',
+      cwd: '/opt/content-bridge',
+      script: '/opt/content-bridge/venv/bin/uvicorn',
+      args: 'backend.main:app --host 0.0.0.0 --port 8000 --workers 2',
+      interpreter: 'none',
+      env: { PYTHONPATH: '/opt/content-bridge' },
+      max_memory_restart: '2G',
+    },
+    {
+      name: 'content-bridge-frontend',
+      cwd: '/opt/content-bridge/frontend',
+      script: 'npm',
+      args: 'start -- --port 3000 --hostname 0.0.0.0',
+      interpreter: 'none',
+      env: { NODE_ENV: 'production' },
+      max_memory_restart: '512M',
+    },
+  ],
+};
+EOF
+```
+
+### Step 5: Start the Services
+
+```bash
+# Start both backend and frontend
+pm2 start ecosystem.config.js
+
+# Save PM2 config (auto-start on reboot)
+pm2 save
+pm2 startup   # Follow the printed command to enable auto-start
+
+# Check status
+pm2 list
+pm2 logs       # View live logs (Ctrl+C to exit)
+```
+
+Your app is now running at:
+- **Frontend:** `http://YOUR_VPS_IP:3000`
+- **Backend API:** `http://YOUR_VPS_IP:8000`
+
+### Step 6: Set Up HTTPS with Caddy (Optional but Recommended)
+
+```bash
+# Install Caddy
+apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+apt update && apt install caddy
+```
+
+Create Caddy config:
+```bash
+cat > /etc/caddy/Caddyfile << 'EOF'
+your-domain.com {
+  encode gzip
+
+  # API & WebSocket → Backend
+  reverse_proxy /api/* 127.0.0.1:8000
+  reverse_proxy /ws/*  127.0.0.1:8000
+  reverse_proxy /health 127.0.0.1:8000
+
+  # Everything else → Frontend
+  reverse_proxy 127.0.0.1:3000
+}
+EOF
+
+systemctl restart caddy
+```
+
+Replace `your-domain.com` with your actual domain. Caddy auto-generates SSL certificates.
+
+No domain? Use the free `sslip.io` trick:
+```
+YOUR_IP.sslip.io {
+  ...
+}
+```
+Example: `103-142-24-60.sslip.io`
+
+### Updating the Code (Sync from GitHub)
+
+When you push new code to GitHub, update the VPS:
+
+```bash
+cd /opt/content-bridge
+git pull origin main
+
+# Reinstall dependencies if requirements changed
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Rebuild frontend if UI changed
+cd frontend && npm run build && cd ..
+
+# Restart services
+pm2 restart all
+```
+
+### Quick One-Liner Deploy Script
+
+Create a deploy script on your VPS for convenience:
+
+```bash
+cat > /opt/content-bridge/deploy.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+cd /opt/content-bridge
+echo "📥 Pulling latest code..."
+git pull origin main
+source venv/bin/activate
+pip install -q -r requirements.txt
+cd frontend && npm run build && cd ..
+pm2 restart all
+echo "✅ Deploy complete!"
+SCRIPT
+chmod +x /opt/content-bridge/deploy.sh
+```
+
+Then deploy anytime with:
+```bash
+bash /opt/content-bridge/deploy.sh
+```
 
 ---
 
