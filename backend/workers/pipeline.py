@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.config import get_settings
+from backend.config import get_settings, get_job_settings
 from backend.database import get_session_factory
 from backend.models import Job, JobStatus, XAccount
 from backend.services.downloader import download_video
@@ -127,7 +127,8 @@ async def run_pipeline(job_id: int, auto_publish: bool = True):
             return
 
         try:
-            settings = get_settings()
+            # Load settings with user-provided key overrides (BYOK)
+            settings = get_job_settings(job.user_keys_json)
 
             # Check for initial cancellation
             if await check_cancellation(session, job): return
@@ -405,7 +406,7 @@ async def run_script_task(job_id: int):
         if not job:
             return
 
-        settings = get_settings()
+        settings = get_job_settings(job.user_keys_json)
 
         try:
             # ── Step 1: Download Video ────────────────────────────────

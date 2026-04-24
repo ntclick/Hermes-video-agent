@@ -6,7 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import select, desc
@@ -55,11 +55,29 @@ class JobResponse(BaseModel):
 @router.post("", response_model=JobResponse, status_code=201)
 async def create_job(
     body: JobCreate,
+    request: Request,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new video processing job."""
     platform = detect_platform(body.url)
+
+    # Extract user-provided API keys from request headers (BYOK)
+    import json
+    user_keys = {}
+    header_map = {
+        "x-kimi-key": "kimi_api_key",
+        "x-hermes-key": "hermes_api_key",
+        "x-fal-key": "fal_api_key",
+        "x-hermes-provider": "hermes_provider",
+        "x-hermes-model": "hermes_model",
+        "x-douyin-cookies": "douyin_cookies",
+        "x-x-cookies": "x_cookies_json",
+    }
+    for header, key_name in header_map.items():
+        val = request.headers.get(header)
+        if val:
+            user_keys[key_name] = val
 
     job = Job(
         url=body.url,
@@ -68,14 +86,17 @@ async def create_job(
         x_account_id=body.x_account_id,
         status=JobStatus.PENDING,
         progress=0.0,
+        user_keys_json=json.dumps(user_keys) if user_keys else None,
     )
     job.append_log(f"📋 Job created for {platform.value}: {body.url}")
+    if user_keys:
+        job.append_log(f"🔑 Using user-provided keys: {', '.join(user_keys.keys())}")
 
     db.add(job)
     await db.commit()
     await db.refresh(job)
 
-    logger.info(f"Created job {job.id}: {body.url}")
+    logger.info(f"Created job {job.id}: {body.url} (BYOK keys: {list(user_keys.keys()) if user_keys else 'none'})")
 
     # Launch pipeline in background
     if body.target_language.startswith("script_") or body.target_language == "script":

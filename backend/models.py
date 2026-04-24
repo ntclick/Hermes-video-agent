@@ -67,6 +67,9 @@ class Job(Base):
     ai_scenes_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     script_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # User-provided API keys (BYOK — stored per-job, cleared after completion)
+    user_keys_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Logs
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

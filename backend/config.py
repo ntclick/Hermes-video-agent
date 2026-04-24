@@ -111,3 +111,54 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def get_job_settings(user_keys_json: str | None = None) -> Settings:
+    """
+    Create a Settings object with user-provided key overrides (BYOK mode).
+    Falls back to .env values for any keys not provided by the user.
+    """
+    base = get_settings()
+    if not user_keys_json:
+        return base
+
+    import json
+    try:
+        user_keys = json.loads(user_keys_json)
+    except (json.JSONDecodeError, TypeError):
+        return base
+
+    if not user_keys:
+        return base
+
+    # Create a copy with overrides
+    overrides = {}
+    for field_name in [
+        "kimi_api_key", "hermes_api_key", "fal_api_key",
+        "hermes_provider", "hermes_model", "douyin_cookies",
+    ]:
+        if field_name in user_keys and user_keys[field_name]:
+            overrides[field_name] = user_keys[field_name]
+
+    if not overrides:
+        return base
+
+    # Build new settings with overrides
+    base_dict = {
+        "kimi_api_key": base.kimi_api_key,
+        "kimi_base_url": base.kimi_base_url,
+        "hermes_provider": base.hermes_provider,
+        "hermes_api_key": base.hermes_api_key,
+        "hermes_base_url": base.hermes_base_url,
+        "hermes_model": base.hermes_model,
+        "fal_api_key": base.fal_api_key,
+        "douyin_cookies": base.douyin_cookies,
+        "whisper_model": base.whisper_model,
+        "data_dir": base.data_dir,
+        "app_host": base.app_host,
+        "app_port": base.app_port,
+        "log_level": base.log_level,
+    }
+    base_dict.update(overrides)
+
+    return Settings(**base_dict)
