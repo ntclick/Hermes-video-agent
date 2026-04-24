@@ -96,11 +96,13 @@ def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
 
     # raw_detections: list of (frame_time, text, x, y, w, h)
     raw = []
-    # Get frame height from first frame to determine subtitle zone
+    # Get frame dimensions from first frame to determine subtitle zone & ignore edges
     frame_h = 0
+    frame_w = 0
     if frames:
         from PIL import Image
         with Image.open(str(frames[0])) as img:
+            frame_w = img.width
             frame_h = img.height
     subtitle_zone_y = int(frame_h * 0.75) if frame_h > 0 else 9999  # bottom 25% = subtitle area
 
@@ -122,12 +124,23 @@ def _detect_text_regions(frames: list[Path], interval: int) -> list[dict]:
             w = int(max(tr[0], br[0]) - x)
             h = int(max(bl[1], br[1]) - y)
 
-            # Skip tiny or huge boxes
-            if w < 25 or h < 12 or w > 1600:
+            # Skip tiny or huge boxes (huge width or height often means vertical watermarks or OCR errors)
+            if w < 25 or h < 12 or w > 1600 or (frame_h > 0 and h > frame_h * 0.25):
                 continue
 
             # Skip text in the bottom 25% — that's our subtitle area, don't blur it
             if y > subtitle_zone_y:
+                continue
+
+            # Skip text that is stuck to the extreme left/right edges (likely logos/watermarks)
+            if frame_w > 0:
+                x_center = x + (w / 2)
+                if x_center < frame_w * 0.15 or x_center > frame_w * 0.85:
+                    continue
+
+            # Skip known watermark text
+            text_lower = text_clean.lower()
+            if "抖音" in text_lower or "tiktok" in text_lower or text_lower.startswith("@"):
                 continue
 
             raw.append({
