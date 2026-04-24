@@ -113,10 +113,19 @@ async def list_jobs(
     limit: int = 20,
     offset: int = 0,
     status: str | None = None,
+    ids: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """List all jobs, newest first."""
-    query = select(Job).order_by(desc(Job.created_at)).offset(offset).limit(limit)
+    query = select(Job).order_by(desc(Job.created_at))
+
+    if ids:
+        try:
+            job_ids = [int(i.strip()) for i in ids.split(",") if i.strip()]
+            if job_ids:
+                query = query.where(Job.id.in_(job_ids))
+        except ValueError:
+            pass
 
     if status:
         try:
@@ -124,6 +133,8 @@ async def list_jobs(
             query = query.where(Job.status == status_enum)
         except ValueError:
             pass
+
+    query = query.offset(offset).limit(limit)
 
     result = await db.execute(query)
     jobs = result.scalars().all()
@@ -235,9 +246,18 @@ async def retry_job(
 
 
 @router.get("/stats/summary")
-async def get_stats(db: AsyncSession = Depends(get_db)):
+async def get_stats(ids: str | None = None, db: AsyncSession = Depends(get_db)):
     """Get job statistics summary."""
-    result = await db.execute(select(Job))
+    query = select(Job)
+    if ids:
+        try:
+            job_ids = [int(i.strip()) for i in ids.split(",") if i.strip()]
+            if job_ids:
+                query = query.where(Job.id.in_(job_ids))
+        except ValueError:
+            pass
+            
+    result = await db.execute(query)
     jobs = result.scalars().all()
 
     stats = {

@@ -30,14 +30,14 @@ from backend.agent.hermes_agent import HermesAgent
 
 # ── Auto Cleanup Task ─────────────────────────────────────────
 async def cleanup_old_files():
-    """Background task to delete old video files (older than 24h) to save storage."""
+    """Background task to delete old video files (older than 4h) to save storage."""
     settings = get_settings()
     dirs_to_clean = [settings.downloads_dir, settings.processed_dir]
     
     while True:
         try:
             now = time.time()
-            cutoff = now - (24 * 3600)  # 24 hours
+            cutoff = now - (4 * 3600)  # 4 hours
             deleted_count = 0
             
             for directory in dirs_to_clean:

@@ -85,6 +85,28 @@ export interface JobStats {
   failed: number;
 }
 
+export function getLocalJobIds(): number[] {
+  if (typeof window === 'undefined') return [];
+  const stored = localStorage.getItem('hermes_job_ids');
+  return stored ? JSON.parse(stored) : [];
+}
+
+export function saveLocalJobId(id: number) {
+  if (typeof window === 'undefined') return;
+  const ids = getLocalJobIds();
+  if (!ids.includes(id)) {
+    ids.push(id);
+    localStorage.setItem('hermes_job_ids', JSON.stringify(ids));
+  }
+}
+
+export function removeLocalJobId(id: number) {
+  if (typeof window === 'undefined') return;
+  const ids = getLocalJobIds();
+  const newIds = ids.filter(i => i !== id);
+  localStorage.setItem('hermes_job_ids', JSON.stringify(newIds));
+}
+
 export async function createJob(url: string, targetLanguage = 'vi', autoPublish = true, xAccountId: number | null = null): Promise<Job> {
   const res = await fetch(`${API_BASE}/api/jobs`, {
     method: 'POST',
@@ -92,7 +114,9 @@ export async function createJob(url: string, targetLanguage = 'vi', autoPublish 
     body: JSON.stringify({ url, target_language: targetLanguage, auto_publish: autoPublish, x_account_id: xAccountId }),
   });
   if (!res.ok) throw new Error(`Failed to create job: ${res.statusText}`);
-  return res.json();
+  const job = await res.json();
+  saveLocalJobId(job.id);
+  return job;
 }
 
 export async function generateCover(jobId: number): Promise<{ message: string }> {
@@ -115,7 +139,9 @@ export async function writeScript(jobId: number): Promise<{ message: string }> {
 
 
 export async function getJobs(limit = 20): Promise<Job[]> {
-  const res = await fetch(`${API_BASE}/api/jobs?limit=${limit}`, { cache: 'no-store' });
+  const ids = getLocalJobIds();
+  if (ids.length === 0) return [];
+  const res = await fetch(`${API_BASE}/api/jobs?limit=${limit}&ids=${ids.join(',')}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to fetch jobs: ${res.statusText}`);
   return res.json();
 }
@@ -144,6 +170,7 @@ export async function cancelJob(id: number): Promise<{ message: string }> {
 export async function deleteJob(id: number): Promise<void> {
   const res = await fetch(`${API_BASE}/api/jobs/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`Failed to delete job: ${res.statusText}`);
+  removeLocalJobId(id);
 }
 
 export async function publishJob(id: number): Promise<{ message: string }> {
@@ -156,7 +183,9 @@ export async function publishJob(id: number): Promise<{ message: string }> {
 }
 
 export async function getStats(): Promise<JobStats> {
-  const res = await fetch(`${API_BASE}/api/jobs/stats/summary`, { cache: 'no-store' });
+  const ids = getLocalJobIds();
+  if (ids.length === 0) return { total: 0, pending: 0, processing: 0, completed: 0, failed: 0 };
+  const res = await fetch(`${API_BASE}/api/jobs/stats/summary?ids=${ids.join(',')}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to fetch stats: ${res.statusText}`);
   return res.json();
 }
