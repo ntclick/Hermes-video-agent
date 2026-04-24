@@ -1,6 +1,6 @@
 # 🤖 Hermes Video Agent — Content Bridge
 
-> An autonomous AI video processing system powered by the **Hermes 3** language model. It handles end-to-end workflows: video extraction, multilingual translation, OCR text replacement, subtitle burning, creative script rewriting, and cross-platform publishing — all orchestrated by an AI agent with tool-calling capabilities.
+> An autonomous AI video processing system powered by the **Hermes Agent** language model. It handles end-to-end workflows: video extraction, multilingual translation, OCR text replacement, subtitle burning, creative script rewriting, and cross-platform publishing — all orchestrated by an AI agent with tool-calling capabilities.
 
 ---
 
