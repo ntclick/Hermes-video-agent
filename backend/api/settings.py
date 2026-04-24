@@ -277,17 +277,15 @@ async def test_and_add_x_account(body: XAccountCreate, db: AsyncSession = Depend
         detail = str(e) or repr(e) or "Unknown error (check server logs)"
         raise HTTPException(status_code=400, detail=f"Authentication test failed: {detail}")
 
-    # Save to DB
-    acc = XAccount(
-        name=name,
-        username=username,
-        cookies_json=body.cookies_json,
-    )
-    db.add(acc)
-    await db.commit()
-    await db.refresh(acc)
-
-    return acc.to_dict()
+    # Return details without saving to DB (BYOK mode - frontend will save to localStorage)
+    import time
+    return {
+        "id": int(time.time()), # Generate a fake ID for frontend list rendering
+        "name": name,
+        "username": username,
+        "cookies_json": body.cookies_json,
+        "created_at": None
+    }
 
 @router.delete("/x-accounts/{account_id}")
 async def delete_x_account(account_id: int, db: AsyncSession = Depends(get_db)):

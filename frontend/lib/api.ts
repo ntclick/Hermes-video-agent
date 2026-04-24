@@ -307,14 +307,10 @@ export async function testKimiConnection(apiKey?: string): Promise<{ status: str
 }
 
 export async function saveDouyinCookies(cookies: string): Promise<{ status: string; message: string; count: number; has_sessionid: boolean }> {
-  const res = await fetch(`${API_BASE}/api/settings/save-douyin`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cookies }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `Save failed: ${res.statusText}`);
-  return data;
+  if (typeof window !== 'undefined') {
+    setClientKeys({ douyin_cookies: cookies });
+  }
+  return { status: 'ok', message: 'Cookies saved to browser', count: 1, has_sessionid: true };
 }
 
 export async function testDouyinCookies(cookies?: string): Promise<{ status: string; message: string }> {
@@ -340,12 +336,16 @@ export interface XAccount {
   name: string | null;
   username: string | null;
   created_at: string | null;
+  cookies_json?: string;
 }
 
+const X_STORAGE_KEY = 'hermes_x_accounts';
+
 export async function getXAccounts(): Promise<XAccount[]> {
-  const res = await fetch(`${API_BASE}/api/settings/x-accounts`);
-  if (!res.ok) throw new Error(`Failed to fetch X accounts: ${res.statusText}`);
-  return res.json();
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(localStorage.getItem(X_STORAGE_KEY) || '[]');
+  } catch { return []; }
 }
 
 export async function testAndAddXAccount(cookiesJson: string): Promise<XAccount> {
@@ -358,12 +358,31 @@ export async function testAndAddXAccount(cookiesJson: string): Promise<XAccount>
     const errorData = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || `Failed to add X account: ${res.statusText}`);
   }
-  return res.json();
+  const acc: XAccount = await res.json();
+  
+  if (typeof window !== 'undefined') {
+    const current = await getXAccounts();
+    localStorage.setItem(X_STORAGE_KEY, JSON.stringify([acc, ...current]));
+    // Also save the cookies to the global byok state (for the first account)
+    if (current.length === 0) {
+      setClientKeys({ x_cookies_json: cookiesJson });
+    }
+  }
+  
+  return acc;
 }
 
 export async function deleteXAccount(id: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/settings/x-accounts/${id}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error(`Failed to delete X account: ${res.statusText}`);
+  if (typeof window !== 'undefined') {
+    const current = await getXAccounts();
+    const updated = current.filter(a => a.id !== id);
+    localStorage.setItem(X_STORAGE_KEY, JSON.stringify(updated));
+    if (updated.length > 0) {
+      setClientKeys({ x_cookies_json: updated[0].cookies_json });
+    } else {
+      setClientKeys({ x_cookies_json: '' }); // Clear it
+    }
+  }
 }
 
 // ── Job Editing & Cover Regeneration ────────────────────────
