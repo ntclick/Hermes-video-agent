@@ -17,6 +17,26 @@ logger = logging.getLogger("content-bridge.renderer")
 TWITTER_MAX_DURATION = 140  # seconds
 TWITTER_MAX_SIZE_MB = 512
 
+_has_nvenc = None
+
+def _check_nvenc():
+    """Check if FFmpeg has NVIDIA GPU encoding support (h264_nvenc)."""
+    global _has_nvenc
+    if _has_nvenc is None:
+        import subprocess
+        try:
+            res = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, check=False
+            )
+            _has_nvenc = "h264_nvenc" in res.stdout
+            if _has_nvenc:
+                logger.info("FFmpeg NVENC (GPU Encoding) is AVAILABLE.")
+            else:
+                logger.info("FFmpeg NVENC is NOT available. Falling back to CPU.")
+        except Exception:
+            _has_nvenc = False
+    return _has_nvenc
 
 async def _get_video_dimensions(video_path: str) -> tuple[int, int] | None:
     """Get video width and height using ffprobe."""
@@ -199,14 +219,24 @@ async def _do_render(
     else:
         cmd.extend(["-vf", full_filter])
 
-    cmd.extend([
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-    ])
+    if _check_nvenc():
+        cmd.extend([
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",  # Good balance of speed/quality for NVENC
+            "-cq", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+        ])
+    else:
+        cmd.extend([
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+        ])
 
     if optimize_for_twitter:
         duration = await _get_duration(video_path)
@@ -254,21 +284,38 @@ async def _reencode_smaller(
     settings = get_settings()
     output_path = str(settings.processed_dir / str(job_id) / "output_compressed.mp4")
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vf", f"scale='min(720,iw)':-2,{sub_filter}",
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "28",
-        "-c:a", "aac",
-        "-b:a", "96k",
-        "-maxrate", "2M",
-        "-bufsize", "4M",
-        "-t", str(TWITTER_MAX_DURATION),
-        "-movflags", "+faststart",
-        output_path,
-    ]
+    if _check_nvenc():
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", f"scale='min(720,iw)':-2,{sub_filter}",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-cq", "28",
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-maxrate", "2M",
+            "-bufsize", "4M",
+            "-t", str(TWITTER_MAX_DURATION),
+            "-movflags", "+faststart",
+            output_path,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", f"scale='min(720,iw)':-2,{sub_filter}",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "28",
+            "-c:a", "aac",
+            "-b:a", "96k",
+            "-maxrate", "2M",
+            "-bufsize", "4M",
+            "-t", str(TWITTER_MAX_DURATION),
+            "-movflags", "+faststart",
+            output_path,
+        ]
 
     process = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE

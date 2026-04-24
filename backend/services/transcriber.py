@@ -80,13 +80,16 @@ async def transcribe_audio(audio_path: str, job_id: int) -> list[dict]:
     logger.info(f"[Job {job_id}] Starting transcription with Whisper...")
 
     def _transcribe():
+        import torch
+        use_gpu = torch.cuda.is_available()
         model = _get_whisper_model()
+        logger.info(f"[Job {job_id}] Whisper using GPU: {use_gpu}")
         result = model.transcribe(
             audio_path,
             task="transcribe",        # Transcribe, not translate
             verbose=False,
             word_timestamps=False,
-            fp16=False,               # CPU compatibility
+            fp16=use_gpu,             # Use FP16 if GPU, FP32 if CPU
         )
         return result
 

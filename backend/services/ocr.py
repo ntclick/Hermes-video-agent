@@ -49,8 +49,10 @@ def _get_reader():
     global _reader
     if _reader is None:
         import easyocr
-        logger.info("Loading EasyOCR models (ch_sim, en)...")
-        _reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+        import torch
+        use_gpu = torch.cuda.is_available()
+        logger.info(f"Loading EasyOCR models (ch_sim, en)... GPU enabled: {use_gpu}")
+        _reader = easyocr.Reader(['ch_sim', 'en'], gpu=use_gpu)
         logger.info("EasyOCR loaded successfully.")
     return _reader
 
