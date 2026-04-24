@@ -74,10 +74,11 @@ async def create_job(
         "x-douyin-cookies": "douyin_cookies",
         "x-x-cookies": "x_cookies_json",
     }
+    from urllib.parse import unquote
     for header, key_name in header_map.items():
         val = request.headers.get(header)
         if val:
-            user_keys[key_name] = val
+            user_keys[key_name] = unquote(val)
 
     job = Job(
         url=body.url,

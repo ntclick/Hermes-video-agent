@@ -41,13 +41,13 @@ export function clearClientKeys() {
 function _byokHeaders(): Record<string, string> {
   const keys = getClientKeys();
   const h: Record<string, string> = {};
-  if (keys.kimi_api_key) h['X-Kimi-Key'] = keys.kimi_api_key;
-  if (keys.hermes_api_key) h['X-Hermes-Key'] = keys.hermes_api_key;
-  if (keys.fal_api_key) h['X-Fal-Key'] = keys.fal_api_key;
-  if (keys.hermes_provider) h['X-Hermes-Provider'] = keys.hermes_provider;
-  if (keys.hermes_model) h['X-Hermes-Model'] = keys.hermes_model;
-  if (keys.douyin_cookies) h['X-Douyin-Cookies'] = keys.douyin_cookies;
-  if (keys.x_cookies_json) h['X-X-Cookies'] = keys.x_cookies_json;
+  if (keys.kimi_api_key) h['X-Kimi-Key'] = encodeURIComponent(keys.kimi_api_key);
+  if (keys.hermes_api_key) h['X-Hermes-Key'] = encodeURIComponent(keys.hermes_api_key);
+  if (keys.fal_api_key) h['X-Fal-Key'] = encodeURIComponent(keys.fal_api_key);
+  if (keys.hermes_provider) h['X-Hermes-Provider'] = encodeURIComponent(keys.hermes_provider);
+  if (keys.hermes_model) h['X-Hermes-Model'] = encodeURIComponent(keys.hermes_model);
+  if (keys.douyin_cookies) h['X-Douyin-Cookies'] = encodeURIComponent(keys.douyin_cookies);
+  if (keys.x_cookies_json) h['X-X-Cookies'] = encodeURIComponent(keys.x_cookies_json);
   return h;
 }
 
