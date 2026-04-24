@@ -12,6 +12,8 @@ if sys.platform == "win32":
 
 import json
 import logging
+import time
+import shutil
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -25,6 +27,39 @@ from backend.api.jobs import router as jobs_router
 from backend.api.settings import router as settings_router
 from backend.workers.pipeline import register_ws, unregister_ws
 from backend.agent.hermes_agent import HermesAgent
+
+# ── Auto Cleanup Task ─────────────────────────────────────────
+async def cleanup_old_files():
+    """Background task to delete old video files (older than 24h) to save storage."""
+    settings = get_settings()
+    dirs_to_clean = [settings.downloads_dir, settings.processed_dir]
+    
+    while True:
+        try:
+            now = time.time()
+            cutoff = now - (24 * 3600)  # 24 hours
+            deleted_count = 0
+            
+            for directory in dirs_to_clean:
+                if not directory.exists():
+                    continue
+                for item in directory.iterdir():
+                    if item.is_dir():
+                        # Check modification time of directory
+                        stat = item.stat()
+                        if stat.st_mtime < cutoff:
+                            try:
+                                shutil.rmtree(item)
+                                deleted_count += 1
+                            except Exception as e:
+                                logger.error(f"Failed to delete {item}: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"🧹 Cleanup: Deleted {deleted_count} old job directories.")
+        except Exception as e:
+            logger.error(f"Cleanup task error: {e}")
+            
+        await asyncio.sleep(6 * 3600)  # Run every 6 hours
 
 # ── Logging Setup ──────────────────────────────────────────────
 settings = get_settings()
@@ -44,6 +79,9 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting Autonomous Content Bridge...")
     await init_db()
     logger.info("✅ Database initialized")
+
+    # Start cleanup background task
+    cleanup_task = asyncio.create_task(cleanup_old_files())
 
     # Bootstrap .env if it doesn't exist yet (first run on Windows)
     from backend.api.settings import ENV_PATH
